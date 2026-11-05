@@ -112,8 +112,9 @@ func (a *App) registerVerbs() {
 		Verb("show", a.culpritShow, "one culprit's row (paths, rebuildable, clear commands, advice) and every path it expands to, sized").Fetch().Quiet().Positional("name").
 		Verb("size", a.culpritSize, "one culprit's size: {name, bytes, human, files, last_used}").Fetch().Quiet().Positional("name").
 		Verb("clear", a.culpritClear, "empty rebuildable culprits (their clear commands, else their paths' contents): NAME gives {name, before, after, freed}; --names or --all (every present rebuildable culprit, never one that is not rebuildable) ask once, listing each with its size and the total, and give {cleared, skipped, freed}").Confirm("Clear {{label}}? Its tool rebuilds it on demand.").Positional("name").Alias("free", "delete").
+		Verb("clear-all", a.culpritClearAll, "empty every present rebuildable culprit after one confirm listing each with its size and the total (clear --all; takes no name, so a key, the help or the palette never mixes it with the focused row): {cleared, skipped, freed}").Confirm("Clear every rebuildable culprit? Their tools rebuild them on demand.").
 		Verb("relocate", a.culpritRelocate, "copy a culprit's paths to TO/<path under home>, verify, delete the source; --link leaves a symlink: {name, dir, moved, freed}").Confirm("Relocate {{label}} (copy, verify, delete)?").Positional("name")
-	setHistory(r, ochazuke.HistoryChange, "culprit.clear", "culprit.relocate")
+	setHistory(r, ochazuke.HistoryChange, "culprit.clear", "culprit.clear-all", "culprit.relocate")
 	// A name may be abbreviated (a unique prefix or an alias), so it is
 	// Free: the verb resolves it and refuses an ambiguous or unknown one;
 	// culprit.names lists what the typed word may mean.
@@ -137,6 +138,7 @@ func (a *App) registerVerbs() {
 		"names": {Type: "array", Description: "several culprit names (each may be a unique prefix or an alias), cleared after one confirm (o-df free NAME NAME... fills it)"},
 		"all":   {Type: "boolean", Description: "every present rebuildable culprit, after one confirm listing them; culprits that are not rebuildable (downloads, movies) are never included"},
 	})
+	set("culprit.clear-all", "{cleared, skipped, freed}", nil)
 	set("culprit.relocate", "{name, dir, moved, freed}", map[string]ochazuke.Parameter{
 		"name":        name,
 		"to":          {Type: "string", Description: "the destination root (default: relocate_to in the culprits file; with neither, relocate fails)"},
@@ -147,6 +149,9 @@ func (a *App) registerVerbs() {
 	// several culprits asks one question naming each with its size;
 	// relocating without a destination fails before asking anything.
 	must(r.AddVerbCheck("culprit.clear", ochazuke.VerbCheck{Name: "clear-many", Check: a.checkClear}))
+	must(r.AddVerbCheck("culprit.clear-all", ochazuke.VerbCheck{Name: "clear-many", Check: func(r *ochazuke.Runtime, cx ochazuke.Context, args ochazuke.Arguments) ochazuke.Verdict {
+		return a.checkClear(r, cx, allArgs(args))
+	}}))
 	must(r.AddVerbCheck("culprit.relocate", ochazuke.VerbCheck{Name: "destination", Check: a.checkRelocate}))
 }
 
@@ -164,7 +169,7 @@ func (a *App) bind() error {
 	r := a.r
 	r.Define("df").Mode("normal").
 		Bind("R", ochazuke.Do("culprit.list")).
-		Bind("D", ochazuke.Do("culprit.clear", ochazuke.Arguments{"all": true}).Hinted("clear all")).
+		Bind("D", ochazuke.Do("culprit.clear-all").Hinted("clear all")).
 		Bind("q", ochazuke.Do("app.quit"))
 	r.Define("culprit").Mode("normal").
 		Bind("d d", ochazuke.Do("list.apply", ochazuke.Arguments{"verb": "clear"}).Hinted("clear")).
@@ -297,6 +302,17 @@ func (a *App) culpritClear(c ochazuke.Ctx) ochazuke.Result {
 		res := v.(ClearResult)
 		return "cleared " + res.Name + ", freed " + Human(res.Freed)
 	}))
+}
+
+// culpritClearAll is clear --all under its own name.
+func (a *App) culpritClearAll(c ochazuke.Ctx) ochazuke.Result {
+	c.Args = allArgs(c.Args)
+	return a.culpritClear(c)
+}
+
+// allArgs is args as clear --all: the all flag only.
+func allArgs(_ ochazuke.Arguments) ochazuke.Arguments {
+	return ochazuke.Arguments{"all": true}
 }
 
 // clearArgs are clear's names (name, then names, once each) and --all.

@@ -800,7 +800,7 @@ func TestFreeArgs(t *testing.T) {
 	}
 }
 
-// D's request (culprit.clear {all: true}) on the page asks once, from the
+// D's request (culprit.clear-all) on the page asks once, from the
 // sizes the list already read, and y clears every rebuildable row.
 func TestClearAllKeyRequest(t *testing.T) {
 	env := fixture(t)
@@ -813,7 +813,7 @@ func TestClearAllKeyRequest(t *testing.T) {
 	}
 	settle(t, a)
 	a.tui = true
-	if _, err := a.r.Execute(ochazuke.Request{Noun: "culprit", Verb: "clear", Target: pageID, Args: ochazuke.Arguments{"all": true}}); err != nil {
+	if _, err := a.r.Execute(ochazuke.Request{Noun: "culprit", Verb: "clear-all", Target: pageID}); err != nil {
 		t.Fatal(err)
 	}
 	top := a.r.Instances[a.r.TopModal()]
