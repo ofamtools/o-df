@@ -5,7 +5,7 @@ go 1.27.1
 require (
 	charm.land/bubbletea/v2 v2.1.0
 	github.com/charmbracelet/x/ansi v0.11.9
-	ofam.dev/ochazuke v0.86.0
+	ofam.dev/ochazuke v0.89.0
 	ofam.dev/oden v0.2.0
 )
 
