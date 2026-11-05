@@ -118,7 +118,7 @@ func (a *App) registerVerbs() {
 	// A name may be abbreviated (a unique prefix or an alias), so it is
 	// Free: the verb resolves it and refuses an ambiguous or unknown one;
 	// culprit.names lists what the typed word may mean.
-	name := ochazuke.Parameter{Type: "string", Description: "a culprit name, an alias or a unique prefix of one (o-df culprit list; default: the focused row's)", Source: "culprit.names", Free: true}
+	name := ochazuke.Parameter{Type: "string", Description: "a culprit name, an alias or a unique prefix of one (o-df culprit list; default: the focused row's, which a key, the help and the palette fill)", Source: "culprit.names", Free: true, From: "row:name"}
 	set := func(key, result string, params map[string]ochazuke.Parameter) {
 		op := r.Operations[r.CanonicalKey(key)]
 		op.Parameters, op.Result = params, result

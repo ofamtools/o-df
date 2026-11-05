@@ -485,6 +485,46 @@ func TestMarkedRowsClearTogether(t *testing.T) {
 	}
 }
 
+// The culprit verbs declare the focused row's name (Parameter.From), so the
+// help's run of an unbound clear, with no key and no name, clears the
+// focused culprit and only it.
+func TestCulpritVerbsFillTheNameFromTheRow(t *testing.T) {
+	env := fixture(t)
+	a, err := New(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, verb := range []string{"show", "size", "clear", "relocate"} {
+		if got := a.r.Operations["culprit."+verb].Parameters["name"].From; got != "row:name" {
+			t.Errorf("culprit.%s name From %q", verb, got)
+		}
+	}
+	if _, err := a.r.Execute(ochazuke.Request{Noun: "culprit", Verb: "list", Target: pageID}); err != nil {
+		t.Fatal(err)
+	}
+	settle(t, a)
+	a.tui = true
+	if err := a.list.Select("culprit/npm-cache"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.list.Focus(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.r.RunUnbound(a.r.BaseFocus(), ochazuke.Request{Noun: "culprit", Verb: "clear"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.r.Execute(ochazuke.Request{Noun: "ochazuke.confirm", Verb: "accept"}); err != nil {
+		t.Fatal(err)
+	}
+	settle(t, a)
+	if _, err := os.Stat(filepath.Join(env.Home, ".npm/_cacache/a")); err == nil {
+		t.Error("the focused culprit survived")
+	}
+	if _, err := os.Stat(filepath.Join(env.Home, "Library/pnpm/store/v10/f")); err != nil {
+		t.Error("an unfocused culprit was cleared")
+	}
+}
+
 func settle(t *testing.T, a *App) {
 	t.Helper()
 	if err := ocli.Settle(a.r, nil); err != nil {
