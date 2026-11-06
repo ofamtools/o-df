@@ -72,7 +72,7 @@ func New(env Env) (*App, error) {
 	if a.list, err = r.AddList(culpritsID, nil, ochazuke.Parent(pageID), ochazuke.Columns(culpritColumns...)); err != nil {
 		return nil, err
 	}
-	r.Define("culprit").Columns(culpritColumns...)
+	r.Define("culprit").Columns(culpritColumns...).Props(culpritProps()...).Store(a.culpritStore())
 	a.registerVerbs()
 	a.m = ochazuke.NewModel(r)
 	a.m.Title = "o-df"
@@ -111,7 +111,7 @@ func (a *App) registerVerbs() {
 		Verb("names", a.culpritNames, "the culprit names a word may mean, for completion: every name for no query, else the one it resolves to (exact, alias or unique prefix) or the ones an ambiguous prefix shares: [{id: NAME, label: title}]").Fetch().Quiet().
 		Verb("show", a.culpritShow, "one culprit's row (paths, rebuildable, clear commands, advice) and every path it expands to, sized").Fetch().Quiet().Positional("name").
 		Verb("size", a.culpritSize, "one culprit's size: {name, bytes, human, files, last_used}").Fetch().Quiet().Positional("name").
-		Verb("clear", a.culpritClear, "empty rebuildable culprits (their clear commands, else their paths' contents): NAME gives {name, before, after, freed}; --names or --all (every present rebuildable culprit, never one that is not rebuildable) ask once, listing each with its size and the total, and give {cleared, skipped, freed}").Confirm("Clear {{label}}? Its tool rebuilds it on demand.").Positional("name").Alias("free", "delete").
+		Verb("clear", a.culpritClear, "empty rebuildable culprits (their clear commands, else their paths' contents): NAME gives {name, before, after, freed}; --names or --all (every present rebuildable culprit, never one that is not rebuildable) ask once, listing each with its size and the total, and give {cleared, skipped, freed}").Confirm("Clear {{label}}? Its tool rebuilds it on demand.").Positional("name").Alias("free").
 		Verb("clear-all", a.culpritClearAll, "empty every present rebuildable culprit after one confirm listing each with its size and the total (clear --all; takes no name, so a key, the help or the palette never mixes it with the focused row): {cleared, skipped, freed}").Confirm("Clear every rebuildable culprit? Their tools rebuild them on demand.").
 		Verb("relocate", a.culpritRelocate, "copy a culprit's paths to TO/<path under home>, verify, delete the source; --link leaves a symlink: {name, dir, moved, freed}").Confirm("Relocate {{label}} (copy, verify, delete)?").Positional("name")
 	setHistory(r, ochazuke.HistoryChange, "culprit.clear", "culprit.clear-all", "culprit.relocate")
@@ -149,6 +149,9 @@ func (a *App) registerVerbs() {
 	// several culprits asks one question naming each with its size;
 	// relocating without a destination fails before asking anything.
 	must(r.AddVerbCheck("culprit.clear", ochazuke.VerbCheck{Name: "clear-many", Check: a.checkClear}))
+	a.defineCoreDelete()
+	setHistory(r, ochazuke.HistoryChange, "culprit.delete")
+	must(r.AddVerbCheck("culprit.delete", ochazuke.VerbCheck{Name: "clear-many", Check: a.checkClear}))
 	must(r.AddVerbCheck("culprit.clear-all", ochazuke.VerbCheck{Name: "clear-many", Check: func(r *ochazuke.Runtime, cx ochazuke.Context, args ochazuke.Arguments) ochazuke.Verdict {
 		return a.checkClear(r, cx, allArgs(args))
 	}}))
