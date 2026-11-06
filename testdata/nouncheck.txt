@@ -1,0 +1,3 @@
+# nouncheck baseline: kind, noun, verb (tab separated), one row per accepted break of the thing and command noun rules.
+# It only shrinks: NOUNCHECK_UPDATE=1 removes rows that no longer match, never adds them. Adding a row is a reviewed edit.
+command-core-verb	culprit	list
