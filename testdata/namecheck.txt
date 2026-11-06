@@ -1,0 +1,6 @@
+# namecheck baseline: file, function, kind, literal, count, reason (tab separated).
+# A row with a reason is a legitimate use that stays. A row without one is debt that may only shrink:
+# NAMECHECK_UPDATE=1 removes rows and lowers counts, never adds them. Adding a row is a reviewed edit.
+app.go	App.pathText	case	"external"	1
+main.go	var categories	table	"culprit"	1
+view.go	describe	case	"external"	1
