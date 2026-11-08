@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -45,12 +48,22 @@ type Report struct {
 func Probe(ctx context.Context, env Env, c Culprit) Report {
 	r := Report{Culprit: c}
 	var paths []string
-	for _, p := range c.Paths {
+	for _, p := range env.rowPaths(ctx, c) {
 		paths = append(paths, env.Templates(p)...)
 	}
+	seen := map[string]bool{}
 	for _, p := range paths {
 		matches, literal := env.Expand(p)
+		matches = slices.DeleteFunc(slices.Clone(matches), func(m string) bool {
+			dup := seen[filepath.Clean(m)]
+			seen[filepath.Clean(m)] = true
+			return dup
+		})
 		if len(matches) == 0 {
+			if seen[filepath.Clean(literal)] {
+				continue
+			}
+			seen[filepath.Clean(literal)] = true
 			r.Found = append(r.Found, PathUsage{Path: literal, State: "absent"})
 			continue
 		}
@@ -59,7 +72,18 @@ func Probe(ctx context.Context, env Env, c Culprit) Report {
 				r.Found = append(r.Found, PathUsage{Path: m, State: "external", Target: resolved})
 				continue
 			}
-			r.Found = append(r.Found, probePath(ctx, m))
+			if why := env.leftOut(c, m); why != "" {
+				r.Found = append(r.Found, PathUsage{Path: m, State: why})
+				continue
+			}
+			pu := probePath(ctx, m)
+			if c.MinAge != "" && pu.State == "present" {
+				age, _ := ParseAge(c.MinAge)
+				if !pu.Usage.LastUsed.IsZero() && env.now().Sub(pu.Usage.LastUsed) < age {
+					pu = PathUsage{Path: m, State: "young", Usage: Usage{LastUsed: pu.Usage.LastUsed}}
+				}
+			}
+			r.Found = append(r.Found, pu)
 		}
 	}
 	for _, f := range r.Found {
@@ -80,6 +104,63 @@ func Probe(ctx context.Context, env Env, c Culprit) Report {
 		}
 	}
 	return r
+}
+
+// rowPaths are the row's static Paths plus the lines its paths_from command
+// prints (none when there is no Query or the command fails); Probe counts a
+// path that several of them resolve to once.
+func (env Env) rowPaths(ctx context.Context, c Culprit) []string {
+	if len(c.PathsFrom) == 0 || env.Query == nil {
+		return c.Paths
+	}
+	out, err := env.Query(ctx, c.PathsFrom)
+	if err != nil {
+		return c.Paths
+	}
+	var got []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			got = append(got, line)
+		}
+	}
+	return append(slices.Clone(c.Paths), got...)
+}
+
+func (env Env) now() time.Time {
+	if env.Now != nil {
+		return env.Now()
+	}
+	return time.Now()
+}
+
+// leftOut is "skipped" when the row's skip or skip_with rules exclude m.
+func (env Env) leftOut(c Culprit, m string) string {
+	for _, g := range c.Skip {
+		if ok, _ := filepath.Match(g, filepath.Base(m)); ok {
+			return "skipped"
+		}
+	}
+	if len(c.SkipWith) == 0 {
+		return ""
+	}
+	found := false
+	root := strings.Count(m, string(filepath.Separator))
+	_ = filepath.WalkDir(m, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || found {
+			return filepath.SkipDir
+		}
+		if strings.Count(p, string(filepath.Separator))-root > 3 && d.IsDir() {
+			return filepath.SkipDir
+		}
+		if slices.Contains(c.SkipWith, d.Name()) {
+			found = true
+		}
+		return nil
+	})
+	if found {
+		return "skipped"
+	}
+	return ""
 }
 
 // deviceOf is the device a path resolves onto (a test hook).

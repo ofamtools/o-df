@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"ofam.dev/ochazuke"
 	ocli "ofam.dev/ochazuke/cli"
@@ -871,5 +872,118 @@ func TestClearAllKeyRequest(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(env.Home, "Downloads/big.zip")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A row's paths_from command (go env GOCACHE) supplies its paths, so a
+// GOCACHE elsewhere is listed, sized and cleared; a failing command falls
+// back to the static paths.
+func TestPathsFromCommandSuppliesPaths(t *testing.T) {
+	env := fixture(t)
+	cache := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cache, "blob"), bytes.Repeat([]byte("x"), 96<<10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var asked [][]string
+	env.Query = func(_ context.Context, argv []string) ([]byte, error) {
+		asked = append(asked, slices.Clone(argv))
+		return []byte(cache + "\n"), nil
+	}
+	out, err := run(t, env, "culprit", "show", "go-build-cache")
+	if err != nil {
+		t.Fatal(err, out)
+	}
+	if !strings.Contains(out, cache) {
+		t.Errorf("show lacks the GOCACHE path %s:\n%s", cache, out)
+	}
+	cfg, err := Load(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(cfg.Culprits, func(c Culprit) bool { return c.Name == "go-build-cache" })
+	r := Probe(context.Background(), env, cfg.Culprits[i])
+	if !r.Present || r.Bytes < 96<<10 || len(r.Found) != 2 || r.Found[0].Path == r.Found[1].Path || (r.Found[0].Path != cache && r.Found[1].Path != cache) {
+		t.Fatalf("probe %+v", r)
+	}
+	if len(asked) == 0 || strings.Join(asked[0], " ") != "go env GOCACHE" {
+		t.Errorf("asked %v", asked)
+	}
+	// free: the dry run targets the path; clear runs the tool's cleaner.
+	if _, err := run(t, env, "free", "go-build-cache", "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	calls := ran(t, env)
+	if len(calls) != 1 || strings.Join(calls[0], " ") != "go clean -cache" {
+		t.Errorf("ran %v", calls)
+	}
+}
+
+func TestPathsFromFailureFallsBackToStaticPaths(t *testing.T) {
+	env := fixture(t)
+	env.Query = func(context.Context, []string) ([]byte, error) { return nil, os.ErrNotExist }
+	cfg, _ := Load(env)
+	i := slices.IndexFunc(cfg.Culprits, func(c Culprit) bool { return c.Name == "go-build-cache" })
+	r := Probe(context.Background(), env, cfg.Culprits[i])
+	if len(r.Found) != 1 || !strings.HasSuffix(r.Found[0].Path, "Library/Caches/go-build") {
+		t.Fatalf("found %+v", r.Found)
+	}
+}
+
+// Both the tool's own location and the default one are listed; a command
+// printing the same path as a static one counts it once.
+func TestPathsFromDedupesAgainstStaticPaths(t *testing.T) {
+	env := fixture(t)
+	env.Query = func(context.Context, []string) ([]byte, error) {
+		return []byte(filepath.Join(env.Home, "Library/Caches/go-build") + "\n"), nil
+	}
+	cfg, _ := Load(env)
+	i := slices.IndexFunc(cfg.Culprits, func(c Culprit) bool { return c.Name == "go-build-cache" })
+	if r := Probe(context.Background(), env, cfg.Culprits[i]); len(r.Found) != 1 {
+		t.Fatalf("found %+v", r.Found)
+	}
+}
+
+// min_age, skip, skip_with and remove_matches are data on a row: only old,
+// non-live, non-checkout scratch entries are listed as present and cleared,
+// each removed whole.
+func TestScratchRowsHonourAgeSkipAndCheckouts(t *testing.T) {
+	env := fixture(t)
+	tmp := t.TempDir()
+	env.Tmp = tmp
+	old := env.now().Add(-72 * time.Hour)
+	mk := func(rel string, mtime time.Time) {
+		p := filepath.Join(tmp, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, bytes.Repeat([]byte("x"), 8<<10), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(p, mtime, mtime)
+		_ = os.Chtimes(filepath.Dir(p), mtime, mtime)
+	}
+	mk("lane-old/out/a", old)
+	mk("lane-young/a", env.now())
+	mk("lane-git/repo/.git/HEAD", old)
+	mk("claude-keep/a", old)
+	mk("install-family-x-1", old)
+	mk("install-family-x-2", env.now())
+	if _, err := run(t, env, "free", "lane-scratch", "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	gone := func(rel string) bool { _, err := os.Lstat(filepath.Join(tmp, rel)); return err != nil }
+	if !gone("lane-old") {
+		t.Error("old scratch dir kept")
+	}
+	for _, keep := range []string{"lane-young", "lane-git", "claude-keep", "install-family-x-1"} {
+		if gone(keep) {
+			t.Errorf("%s removed", keep)
+		}
+	}
+	if _, err := run(t, env, "free", "install-family-builds", "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	if !gone("install-family-x-1") || gone("install-family-x-2") {
+		t.Error("installer builds: want only the old one removed")
 	}
 }

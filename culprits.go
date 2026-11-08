@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 )
 
 // A culprit is one row of data: a named group of paths that grows on its
@@ -37,6 +38,11 @@ type Culprit struct {
 	// one path per entry of the file's project_roots (none when the list
 	// is empty). A missing path is absent, not an error.
 	Paths []string `json:"paths"`
+	// PathsFrom, when set, is a command (argv) whose stdout lines are the
+	// paths, asked each time the row is probed (go env GOCACHE). Its paths are
+	// added to Paths, each location listed and sized once; a missing or
+	// failing command adds none. See Env.Query.
+	PathsFrom []string `json:"paths_from,omitempty"`
 	// Rebuildable says the owning tool recreates the data on demand; only
 	// a rebuildable culprit can be cleared.
 	Rebuildable bool   `json:"rebuildable"`
@@ -48,6 +54,19 @@ type Culprit struct {
 	// holding {path} runs once per present path. Otherwise clear removes the
 	// contents of each path (the directory itself stays).
 	Clear [][]string `json:"clear,omitempty"`
+	// MinAge, when set ("24h", "7d"), leaves out a matched path whose
+	// newest file is younger (state "young"): it is neither sized nor
+	// cleared. An open or running thing keeps writing, so it stays young.
+	MinAge string `json:"min_age,omitempty"`
+	// Skip are base-name globs of matched paths to leave out (state
+	// "skipped"), for the live ones (mtm-daemon).
+	Skip []string `json:"skip,omitempty"`
+	// SkipWith are names that, found within three levels below a matched
+	// directory, leave it out (".git": a checkout is never scratch).
+	SkipWith []string `json:"skip_with,omitempty"`
+	// RemoveMatches makes clear delete each matched path itself, not just
+	// its contents (a glob of scratch directories or staged files).
+	RemoveMatches bool `json:"remove_matches,omitempty"`
 	// Recommend is the advice the scan prints: delete, relocate or keep.
 	Recommend string `json:"recommend,omitempty"`
 	Notes     string `json:"notes,omitempty"`
@@ -90,6 +109,15 @@ type Env struct {
 	// that records the argv and runs nothing. With none set, Clear runs a
 	// command only when Home is the real home directory (CommandRunner).
 	Run func(ctx context.Context, argv []string) ([]byte, error)
+	// Query runs a read-only command for a row's paths_from and returns
+	// its stdout. DefaultEnv sets ExecOutput; a test sets a fake. With
+	// none set, paths_from is not asked and the row's Paths stand.
+	// Tmp is what {tmp} stands for in a culprit path (the system scratch
+	// directory); DefaultEnv sets /private/tmp on macOS.
+	Tmp string
+	// Now is the clock for min_age; nil is time.Now.
+	Now   func() time.Time
+	Query func(ctx context.Context, argv []string) ([]byte, error)
 }
 
 // ProjectRootPlaceholder in a culprit path stands for each project root.
@@ -107,7 +135,7 @@ func DefaultEnv() Env {
 		}
 		file = filepath.Join(dir, "o-df", "culprits.json")
 	}
-	return Env{Home: home, UserFile: file, Run: ExecCommand}
+	return Env{Home: home, UserFile: file, Run: ExecCommand, Query: ExecOutput, Tmp: defaultTmp()}
 }
 
 // Load merges the embedded defaults with the user's file (absent is fine)
@@ -183,13 +211,21 @@ func validate(cfg Config) error {
 			return fmt.Errorf("culprit %q: a name is one word without / or spaces", c.Name)
 		case seen[c.Name]:
 			return fmt.Errorf("culprit %q is listed twice", c.Name)
-		case len(c.Paths) == 0 && len(c.Size) == 0:
+		case len(c.Paths) == 0 && len(c.Size) == 0 && len(c.PathsFrom) == 0:
 			return fmt.Errorf("culprit %q has no paths", c.Name)
 		}
 		for _, alias := range c.Aliases {
 			if alias == "" || strings.ContainsAny(alias, "/ ") {
 				return fmt.Errorf("culprit %q: alias %q is not one word without / or spaces", c.Name, alias)
 			}
+		}
+		if c.MinAge != "" {
+			if _, err := ParseAge(c.MinAge); err != nil {
+				return fmt.Errorf("culprit %q: min_age: %w", c.Name, err)
+			}
+		}
+		if c.PathsFrom != nil && len(c.PathsFrom) == 0 {
+			return fmt.Errorf("culprit %q: an empty paths_from command", c.Name)
 		}
 		for _, cmd := range c.Clear {
 			if len(cmd) == 0 {
@@ -204,6 +240,9 @@ func validate(cfg Config) error {
 // Templates are a culprit path with {project_root} filled in once per
 // project root (no paths when there are none), else the path alone.
 func (env Env) Templates(p string) []string {
+	if env.Tmp != "" {
+		p = strings.ReplaceAll(p, TmpPlaceholder, strings.TrimRight(env.Tmp, "/"))
+	}
 	if !strings.Contains(p, ProjectRootPlaceholder) {
 		return []string{p}
 	}
@@ -245,4 +284,30 @@ func (env Env) Tilde(p string) string {
 		return "~/" + rest
 	}
 	return p
+}
+
+// TmpPlaceholder in a culprit path stands for Env.Tmp.
+const TmpPlaceholder = "{tmp}"
+
+func defaultTmp() string {
+	if _, err := os.Stat("/private/tmp"); err == nil {
+		return "/private/tmp"
+	}
+	return os.TempDir()
+}
+
+// ParseAge reads "90m", "24h" or "7d".
+func ParseAge(s string) (time.Duration, error) {
+	if n, ok := strings.CutSuffix(s, "d"); ok {
+		var days int
+		if _, err := fmt.Sscanf(n, "%d", &days); err != nil || days < 0 {
+			return 0, fmt.Errorf("%q is not an age", s)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%q is not an age", s)
+	}
+	return d, nil
 }

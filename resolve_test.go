@@ -180,7 +180,12 @@ func TestResolveSeveralNames(t *testing.T) {
 	if err != nil || strings.Count(out, `"name": "npm-cache"`) != 1 || !strings.Contains(out, `"name": "go-build-cache"`) {
 		t.Fatalf("--names: %v %s", err, out)
 	}
-	gone(t, env, ".npm/_cacache/a", "Library/Caches/go-build/aa/x")
+	// go-build-cache clears with the tool's own cleaner (the fixture's
+	// runner records it), not by removing the directory.
+	gone(t, env, ".npm/_cacache/a")
+	if calls := ran(t, env); len(calls) != 1 || strings.Join(calls[0], " ") != "go clean -cache" {
+		t.Errorf("ran %v", calls)
+	}
 	env = goFixture(t)
 	if out, err := run(t, env, "culprit", "clear", "--names", `["go"]`, "--yes"); err == nil {
 		t.Fatalf("--names [go] ran: %s", out)

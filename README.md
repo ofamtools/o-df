@@ -214,9 +214,13 @@ A culprit row's fields:
 | `name` | one word, the id (`culprit/NAME`) |
 | `aliases` | more words that name the row (`brew` for homebrew-cache) |
 | `title`, `category`, `notes` | shown in the detail |
-| `paths` | `~`, `$HOME`, `*` (one path segment, `filepath.Glob`) and `{project_root}` (each of `project_roots`); a missing path is absent |
+| `paths` | `~`, `$HOME`, `*` (one path segment, `filepath.Glob`) and `{project_root}` (each of `project_roots`) and `{tmp}` (the system scratch directory); a missing path is absent |
 | `rebuildable` | the owning tool recreates the data; only these can be cleared |
 | `rebuild` | how it comes back |
+| `paths_from` | a command whose stdout lines are more paths, added to `paths` and listed once each (`["go","env","GOCACHE"]`); a missing or failing command adds none |
+| `min_age` | `24h`, `7d`: a matched path whose newest file is younger is `young`, neither sized nor cleared |
+| `skip`, `skip_with` | base-name globs to leave out; names (`.git`) that, within three levels below a matched directory, leave it out |
+| `remove_matches` | clear deletes each matched path itself, not only its contents |
 | `size` | a command whose stdout's first integer is the size in bytes, instead of walking `paths` |
 | `clear` | commands (each an argv) instead of removing the paths' contents; a command holding `{path}` runs once per present path |
 | `recommend` | `delete`, `relocate` or `keep`: the advice the scan prints |

@@ -24,6 +24,12 @@ func ExecCommand(ctx context.Context, argv []string) ([]byte, error) {
 	return exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
 }
 
+// ExecOutput runs argv and returns its stdout alone: the real binary's
+// Env.Query.
+func ExecOutput(ctx context.Context, argv []string) ([]byte, error) {
+	return exec.CommandContext(ctx, argv[0], argv[1:]...).Output()
+}
+
 // CommandRunner is what runs a clear command: Env.Run, else ExecCommand
 // when Home is the real home directory. A Home that is not (a test's temp
 // HOME) with no runner set is refused: a clear command acts on the
@@ -83,7 +89,11 @@ func Clear(ctx context.Context, env Env, c Culprit) (ClearResult, error) {
 		}
 	} else {
 		for _, p := range paths {
-			if err := emptyPath(p); err != nil {
+			clear := emptyPath
+			if c.RemoveMatches {
+				clear = removeAll
+			}
+			if err := clear(p); err != nil {
 				return res, err
 			}
 			res.Cleared = append(res.Cleared, p)
