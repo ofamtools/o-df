@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"ofam.dev/ochazuke"
+	ocli "ofam.dev/ochazuke/cli"
 	"os"
 	"path/filepath"
 	"slices"
@@ -213,7 +216,7 @@ func TestNameChoicesForPalette(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	param := a.r.Operations[a.r.CanonicalKey("culprit.clear")].Parameters["name"]
+	param := a.r.Operations.At(ochazuke.Key(a.r.CanonicalKey("culprit.clear"))).Parameters["name"]
 	ids := func(word string) []string {
 		choices, err := a.r.ChoicesFor(a.r.Context(), param, word)
 		if err != nil {
@@ -239,4 +242,26 @@ func TestNameChoicesForPalette(t *testing.T) {
 	if got := ids(""); len(got) != len(a.Cfg.Culprits) {
 		t.Errorf("no word lists %d of %d", len(got), len(a.Cfg.Culprits))
 	}
+}
+
+func TestCatalogDeclaresSingularNamespace(t *testing.T) {
+	var doc ocli.CatalogDoc
+	if err := json.Unmarshal([]byte(catalogJSON(t)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Namespace != "df" || ochazuke.DefaultNamespace != "df" {
+		t.Fatalf("catalog namespace %q, default %q; want df", doc.Namespace, ochazuke.DefaultNamespace)
+	}
+	if got, err := ocli.CatalogNamespace(doc, "o-df"); err != nil || got != "df" {
+		t.Fatal(got, err)
+	}
+}
+
+func catalogJSON(t *testing.T) string {
+	t.Helper()
+	var out, errb bytes.Buffer
+	if err := Main([]string{"catalog"}, goFixture(t), strings.NewReader(""), &out, &errb); err != nil {
+		t.Fatal(err, errb.String())
+	}
+	return out.String()
 }

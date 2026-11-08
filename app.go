@@ -57,6 +57,16 @@ type App struct {
 	Stdout, Stderr io.Writer
 }
 
+// Namespace is the singular namespace o-df declares (lexicon plan): its
+// operations are df.<noun>.<verb> and a host mounts its catalog under it.
+const Namespace = "df"
+
+func init() {
+	if err := ochazuke.DeclareNamespace(Namespace); err != nil {
+		panic(err)
+	}
+}
+
 // New builds the runtime: the page holding the culprit list, the noun
 // with its columns, verbs and bindings, and the model.
 func New(env Env) (*App, error) {
@@ -120,9 +130,9 @@ func (a *App) registerVerbs() {
 	// culprit.names lists what the typed word may mean.
 	name := ochazuke.Parameter{Type: "string", Description: "a culprit name, an alias or a unique prefix of one (o-df culprit list; default: the focused row's, which a key, the help and the palette fill)", Source: "culprit.names", Free: true, From: "row:name"}
 	set := func(key, result string, params map[string]ochazuke.Parameter) {
-		op := r.Operations[r.CanonicalKey(key)]
+		op := r.Operations.At(ochazuke.Key(r.CanonicalKey(key)))
 		op.Parameters, op.Result = params, result
-		r.Operations[r.CanonicalKey(key)] = op
+		r.Operations.Set(op)
 	}
 	set("culprit.list", "row[]", map[string]ochazuke.Parameter{
 		"all":      {Type: "boolean", Description: "include culprits none of whose paths exist"},
@@ -650,11 +660,11 @@ func (a *App) rows(reps []Report) []ocli.Row {
 // setHistory declares the history kind of each named verb (from o-git).
 func setHistory(r *ochazuke.Runtime, kind string, keys ...string) {
 	for _, key := range keys {
-		op, ok := r.Operations[r.CanonicalKey(key)]
+		op, ok := r.Operations.Find(ochazuke.Key(r.CanonicalKey(key)))
 		if !ok {
 			panic("setHistory: no operation " + key)
 		}
 		op.HistoryKind = kind
-		r.Operations[r.CanonicalKey(key)] = op
+		r.Operations.Set(op)
 	}
 }

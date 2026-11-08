@@ -58,14 +58,13 @@ func (a *App) culpritStore() ochazuke.Store {
 // delete runs the same handler, parameters, check and confirm as clear.
 // Both names work (Keep actions); culprit.delete was clear's alias.
 func (a *App) defineCoreDelete() {
-	src := a.r.Operations[a.r.CanonicalKey("culprit.clear")]
+	src := a.r.Operations.At(ochazuke.Key(a.r.CanonicalKey("culprit.clear")))
 	op := src
-	op.Noun, op.Verb, op.Standard, op.Unavailable = "culprit", "delete", "", ""
+	op.Key, op.Standard, op.Unavailable = ochazuke.KeyOf("culprit", "delete"), "", ""
 	op.Aliases = nil
 	op.Description = src.Description + " (as culprit.clear)"
-	if op.App != nil {
+	if op.AppHandler != nil {
 		op.Run = nil
 	}
 	a.r.Register(op)
-	a.r.Define("culprit").Verbs("delete")
 }

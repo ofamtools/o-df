@@ -495,7 +495,7 @@ func TestCulpritVerbsFillTheNameFromTheRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, verb := range []string{"show", "size", "clear", "relocate"} {
-		if got := a.r.Operations["culprit."+verb].Parameters["name"].From; got != "row:name" {
+		if got := a.r.Operations.At(ochazuke.Key("culprit." + verb)).Parameters["name"].From; got != "row:name" {
 			t.Errorf("culprit.%s name From %q", verb, got)
 		}
 	}
