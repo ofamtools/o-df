@@ -61,6 +61,10 @@ type Culprit struct {
 	// Skip are base-name globs of matched paths to leave out (state
 	// "skipped"), for the live ones (mtm-daemon).
 	Skip []string `json:"skip,omitempty"`
+	// SkipFrom is a command (argv) whose stdout lines are more Skip globs,
+	// asked on each probe (the names of running servers). Without Env.Query,
+	// or when it fails, every match is left out: it fails closed.
+	SkipFrom []string `json:"skip_from,omitempty"`
 	// SkipWith are names that, found within three levels below a matched
 	// directory, leave it out (".git": a checkout is never scratch).
 	SkipWith []string `json:"skip_with,omitempty"`
@@ -223,6 +227,9 @@ func validate(cfg Config) error {
 			if _, err := ParseAge(c.MinAge); err != nil {
 				return fmt.Errorf("culprit %q: min_age: %w", c.Name, err)
 			}
+		}
+		if c.SkipFrom != nil && len(c.SkipFrom) == 0 {
+			return fmt.Errorf("culprit %q: an empty skip_from command", c.Name)
 		}
 		if c.PathsFrom != nil && len(c.PathsFrom) == 0 {
 			return fmt.Errorf("culprit %q: an empty paths_from command", c.Name)

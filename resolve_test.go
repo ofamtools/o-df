@@ -183,7 +183,7 @@ func TestResolveSeveralNames(t *testing.T) {
 	// go-build-cache clears with the tool's own cleaner (the fixture's
 	// runner records it), not by removing the directory.
 	gone(t, env, ".npm/_cacache/a")
-	if calls := ran(t, env); len(calls) != 1 || strings.Join(calls[0], " ") != "go clean -cache" {
+	if calls := ran(t, env); len(calls) != 2 || strings.Join(calls[0], " ") != "go clean -cache" {
 		t.Errorf("ran %v", calls)
 	}
 	env = goFixture(t)

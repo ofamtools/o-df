@@ -913,7 +913,7 @@ func TestPathsFromCommandSuppliesPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := ran(t, env)
-	if len(calls) != 1 || strings.Join(calls[0], " ") != "go clean -cache" {
+	if len(calls) != 2 || strings.Join(calls[0], " ") != "go clean -cache" || calls[1][0] != "sh" {
 		t.Errorf("ran %v", calls)
 	}
 }
@@ -985,5 +985,45 @@ func TestScratchRowsHonourAgeSkipAndCheckouts(t *testing.T) {
 	}
 	if !gone("install-family-x-1") || gone("install-family-x-2") {
 		t.Error("installer builds: want only the old one removed")
+	}
+}
+
+// A server a running process names is never offered, whatever its age; if
+// the listing cannot be asked, nothing is offered.
+func TestSkipFromKeepsRunningServers(t *testing.T) {
+	env := fixture(t)
+	old := env.now().Add(-72 * time.Hour)
+	for _, n := range []string{"live-idle", "dead-one"} {
+		p := filepath.Join(env.Home, "Library/Application Support/tuios-servers", n, "state")
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(p, old, old)
+		_ = os.Chtimes(filepath.Dir(p), old, old)
+	}
+	env.Query = func(_ context.Context, argv []string) ([]byte, error) {
+		if argv[0] == "sh" {
+			return []byte("live-idle\n"), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	if _, err := run(t, env, "free", "tuios-server-dirs", "--yes"); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(env.Home, "Library/Application Support/tuios-servers")
+	if _, err := os.Stat(filepath.Join(base, "live-idle")); err != nil {
+		t.Error("running server's dir removed")
+	}
+	if _, err := os.Stat(filepath.Join(base, "dead-one")); err == nil {
+		t.Error("dead server's dir kept")
+	}
+	env.Query = func(context.Context, []string) ([]byte, error) { return nil, os.ErrNotExist }
+	cfg, _ := Load(env)
+	i := slices.IndexFunc(cfg.Culprits, func(c Culprit) bool { return c.Name == "tuios-server-dirs" })
+	if r := Probe(context.Background(), env, cfg.Culprits[i]); r.Present {
+		t.Errorf("failed listing still offers %+v", r.Found)
 	}
 }

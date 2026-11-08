@@ -52,6 +52,7 @@ func Probe(ctx context.Context, env Env, c Culprit) Report {
 		paths = append(paths, env.Templates(p)...)
 	}
 	seen := map[string]bool{}
+	c, closed := env.withSkipFrom(ctx, c)
 	for _, p := range paths {
 		matches, literal := env.Expand(p)
 		matches = slices.DeleteFunc(slices.Clone(matches), func(m string) bool {
@@ -72,7 +73,7 @@ func Probe(ctx context.Context, env Env, c Culprit) Report {
 				r.Found = append(r.Found, PathUsage{Path: m, State: "external", Target: resolved})
 				continue
 			}
-			if why := env.leftOut(c, m); why != "" {
+			if why := env.leftOut(c, m, closed); why != "" {
 				r.Found = append(r.Found, PathUsage{Path: m, State: why})
 				continue
 			}
@@ -133,8 +134,33 @@ func (env Env) now() time.Time {
 	return time.Now()
 }
 
+// withSkipFrom adds the lines of the row's skip_from command to its Skip;
+// closed is true when that command could not be asked.
+func (env Env) withSkipFrom(ctx context.Context, c Culprit) (Culprit, bool) {
+	if len(c.SkipFrom) == 0 {
+		return c, false
+	}
+	if env.Query == nil {
+		return c, true
+	}
+	out, err := env.Query(ctx, c.SkipFrom)
+	if err != nil {
+		return c, true
+	}
+	c.Skip = slices.Clone(c.Skip)
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			c.Skip = append(c.Skip, line)
+		}
+	}
+	return c, false
+}
+
 // leftOut is "skipped" when the row's skip or skip_with rules exclude m.
-func (env Env) leftOut(c Culprit, m string) string {
+func (env Env) leftOut(c Culprit, m string, closed bool) string {
+	if closed {
+		return "skipped"
+	}
 	for _, g := range c.Skip {
 		if ok, _ := filepath.Match(g, filepath.Base(m)); ok {
 			return "skipped"
