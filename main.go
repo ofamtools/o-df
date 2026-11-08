@@ -55,7 +55,6 @@ func Main(args []string, env Env, stdin io.Reader, stdout, stderr io.Writer) err
 			return scan(a, args)
 		}))
 	sh := a.Shell()
-	ocli.Mount(app, sh)
 	app.Add(oden.Command{Name: "scan", Summary: "the culprits by size and the disk's totals (o-df with no command too)", Usage: "[--all] [--json] [--timeout 60s] [--external]", Source: "o-df",
 		Run: func(_ context.Context, args []string) error { return scan(a, args) }})
 	app.Add(oden.Command{Name: "top", Summary: "the biggest directories and files under PATH (default .): one parallel walk, this volume only", Usage: "[PATH] [--depth N] [--n N] [--min SIZE] [--timeout 5m] [--external] [--json]", Source: "o-df",
@@ -68,6 +67,10 @@ func Main(args []string, env Env, stdin io.Reader, stdout, stderr io.Writer) err
 		Run: func(ctx context.Context, args []string) error {
 			return sh.Run(ctx, append([]string{"culprit", "clear"}, freeArgs(args)...))
 		}})
+	// The tool's own commands are added first: Mount reads a word that names
+	// no command through the nouns' verbs, so a command wins over a verb of
+	// the same name.
+	ocli.Mount(app, sh)
 	return app.Run(context.Background())
 }
 

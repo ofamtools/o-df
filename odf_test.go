@@ -426,7 +426,7 @@ func TestHardLinkCountsOnce(t *testing.T) {
 
 func TestCulpritVerbs(t *testing.T) {
 	env := fixture(t)
-	out, err := run(t, env, "culprit", "size", "npm-cache")
+	out, err := run(t, env, "culprit", "get", "npm-cache", "--prop", "size")
 	if err != nil || !strings.Contains(out, `"human"`) {
 		t.Fatalf("size: %v %s", err, out)
 	}
@@ -438,7 +438,7 @@ func TestCulpritVerbs(t *testing.T) {
 	if err != nil || !strings.Contains(out, "pnpm-store") {
 		t.Fatalf("list: %v %s", err, out)
 	}
-	if _, err := run(t, env, "culprit", "size", "nope"); err == nil {
+	if _, err := run(t, env, "culprit", "get", "nope", "--prop", "size"); err == nil {
 		t.Fatal("sized an unknown culprit")
 	}
 }
@@ -471,7 +471,7 @@ func TestMarkedRowsClearTogether(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := a.r.Execute(ochazuke.Request{Noun: "ochazuke.list", Verb: "apply", Args: ochazuke.Arguments{"id": culpritsID, "verb": "clear", "confirmed": true}}); err != nil {
+	if _, err := a.r.Execute(ochazuke.Request{Noun: "ochazuke.collection", Verb: "apply", Args: ochazuke.Arguments{"id": culpritsID, "verb": "clear", "confirmed": true}}); err != nil {
 		t.Fatal(err)
 	}
 	settle(t, a)
@@ -494,7 +494,7 @@ func TestCulpritVerbsFillTheNameFromTheRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, verb := range []string{"show", "size", "clear", "relocate"} {
+	for _, verb := range []string{"show", "clear", "relocate"} {
 		if got := a.r.Operations.At(ochazuke.Key("culprit." + verb)).Parameters["name"].From; got != "row:name" {
 			t.Errorf("culprit.%s name From %q", verb, got)
 		}

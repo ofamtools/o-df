@@ -37,7 +37,7 @@ o df scan [--all] [--json] [--timeout 60s] [--external]
 o df top [PATH] [--depth 2] [--n 30] [--min 100M] [--timeout 5m] [--external] [--json]
 o df culprit list [--all] [--format table]
 o df culprit show NAME
-o df culprit size NAME
+o df culprit get NAME --prop size
 o df free NAME... [--yes]   # clear culprits; o df delete is the same command
 o df free --all [--yes]     # clear every present rebuildable culprit
 o df culprit clear NAME [--yes]            # culprit free and culprit delete too
@@ -105,7 +105,7 @@ confirm names the full culprit.
 - `names [--query WORD]`: the names WORD may mean, `[{id, label}]` (every
   name for no word): the palette's choices for NAME.
 - `show NAME`: the row and every path it expands to, sized.
-- `size NAME`: `{name, bytes, human, files, last_used}`.
+- `get NAME --prop size`: `{name, bytes, human, files, last_used}` (the computed size prop of a culprit).
 - `clear NAME`: only for a rebuildable culprit, after a confirm (`--yes`
   answers it). It runs the row's `clear` commands, or removes the contents
   of each present path (the directories stay). Read-only trees are made

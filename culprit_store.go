@@ -30,7 +30,7 @@ func culpritProps() []ochazuke.PropSpec {
 
 func (a *App) culpritStore() ochazuke.Store {
 	return ochazuke.Store{
-		Kind:  ochazuke.Collection,
+		Kind:  ochazuke.KindCollection,
 		Facts: true,
 		Get: func(_ ochazuke.Ctx, name string) (ochazuke.Thing, error) {
 			cu, err := a.Cfg.Resolve(name)

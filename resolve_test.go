@@ -81,7 +81,7 @@ func TestResolveUniquePrefixAndAlias(t *testing.T) {
 	if err != nil || !strings.Contains(out, `"name": "go-build-cache"`) {
 		t.Fatalf("show go-b: %v %s", err, out)
 	}
-	if out, err := run(t, env, "culprit", "size", "brew"); err != nil || !strings.Contains(out, `"name": "homebrew-cache"`) {
+	if out, err := run(t, env, "culprit", "get", "brew", "--prop", "size"); err != nil || !strings.Contains(out, `"name": "homebrew-cache"`) {
 		t.Fatalf("size brew: %v %s", err, out)
 	}
 	// The confirm names the full culprit and the word it came from.
@@ -107,7 +107,7 @@ func TestResolveAmbiguousNeverActs(t *testing.T) {
 	env := goFixture(t)
 	const want = `"go" is ambiguous: go-build-cache, go-mod-cache`
 	for _, args := range [][]string{
-		{"culprit", "size", "go"},
+		{"culprit", "get", "go", "--prop", "size"},
 		{"culprit", "clear", "go", "--yes"},
 		{"free", "go", "--yes"},
 		{"delete", "go", "--yes"},
@@ -123,7 +123,7 @@ func TestResolveAmbiguousNeverActs(t *testing.T) {
 
 func TestResolveUnknownSuggests(t *testing.T) {
 	env := goFixture(t)
-	out, err := run(t, env, "culprit", "size", "gp-build-cache")
+	out, err := run(t, env, "culprit", "get", "gp-build-cache", "--prop", "size")
 	if err == nil || !strings.Contains(out+err.Error(), `no culprit "gp-build-cache"; did you mean: go-build-cache`) {
 		t.Fatalf("typo: %v %s", err, out)
 	}

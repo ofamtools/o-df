@@ -1,0 +1,6 @@
+kind	old	new	note
+operation	df.culprit.size	df.culprit.get {prop: size}	read-only value verb is a computed prop of the culprit
+page-kind	df	df-page	the namespace word df is not a noun
+binding	df/normal	df-page/normal	binding context follows the page kind
+binding	list.apply	collection.apply	ochazuke renamed the list noun (v0.104.0)
+cli	o df culprit size NAME	o df culprit get NAME --prop size	

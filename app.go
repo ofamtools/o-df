@@ -40,7 +40,7 @@ var culpritColumns = []ochazuke.Column{
 type App struct {
 	r    *ochazuke.Runtime
 	m    *ochazuke.Model
-	list *ochazuke.List
+	list *ochazuke.Collection
 
 	Env Env
 	Cfg Config
@@ -78,11 +78,11 @@ func New(env Env) (*App, error) {
 	env.External = env.External || cfg.External
 	env.ProjectRoots = cfg.ProjectRoots
 	a := &App{r: r, Env: env, Cfg: cfg, Now: time.Now, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
-	r.Instance(pageID, ochazuke.Kind("df"))
+	r.Instance(pageID, ochazuke.Kind("df-page"))
 	if a.list, err = r.AddList(culpritsID, nil, ochazuke.Parent(pageID), ochazuke.Columns(culpritColumns...)); err != nil {
 		return nil, err
 	}
-	r.Define("culprit").Columns(culpritColumns...).Props(culpritProps()...).Store(a.culpritStore())
+	r.Define("culprit").Main().Columns(culpritColumns...).Props(append(culpritProps(), a.sizeProp())...).Store(a.culpritStore())
 	a.registerVerbs()
 	a.m = ochazuke.NewModel(r)
 	a.m.Title = "o-df"
@@ -120,7 +120,6 @@ func (a *App) registerVerbs() {
 		Verb("list", a.culpritList, "every culprit with its size, biggest first: rows {noun, id: culprit/NAME, label, data: report, cells}; --all includes the absent ones").Rows("culprit").Fetch().Quiet().
 		Verb("names", a.culpritNames, "the culprit names a word may mean, for completion: every name for no query, else the one it resolves to (exact, alias or unique prefix) or the ones an ambiguous prefix shares: [{id: NAME, label: title}]").Fetch().Quiet().
 		Verb("show", a.culpritShow, "one culprit's row (paths, rebuildable, clear commands, advice) and every path it expands to, sized").Fetch().Quiet().Positional("name").
-		Verb("size", a.culpritSize, "one culprit's size: {name, bytes, human, files, last_used}").Fetch().Quiet().Positional("name").
 		Verb("clear", a.culpritClear, "empty rebuildable culprits (their clear commands, else their paths' contents): NAME gives {name, before, after, freed}; --names or --all (every present rebuildable culprit, never one that is not rebuildable) ask once, listing each with its size and the total, and give {cleared, skipped, freed}").Confirm("Clear {{label}}? Its tool rebuilds it on demand.").Positional("name").Alias("free").
 		Verb("clear-all", a.culpritClearAll, "empty every present rebuildable culprit after one confirm listing each with its size and the total (clear --all; takes no name, so a key, the help or the palette never mixes it with the focused row): {cleared, skipped, freed}").Confirm("Clear every rebuildable culprit? Their tools rebuild them on demand.").
 		Verb("relocate", a.culpritRelocate, "copy a culprit's paths to TO/<path under home>, verify, delete the source; --link leaves a symlink: {name, dir, moved, freed}").Confirm("Relocate {{label}} (copy, verify, delete)?").Positional("name")
@@ -142,7 +141,6 @@ func (a *App) registerVerbs() {
 		ochazuke.ChoicesQueryParameter: {Type: "string", Description: "the word typed so far"},
 	})
 	set("culprit.show", "report", map[string]ochazuke.Parameter{"name": name})
-	set("culprit.size", "{name, bytes, human, files, last_used}", map[string]ochazuke.Parameter{"name": name})
 	set("culprit.clear", "{name, before, after, freed} | {cleared, skipped, freed}", map[string]ochazuke.Parameter{
 		"name":  name,
 		"names": {Type: "array", Description: "several culprit names (each may be a unique prefix or an alias), cleared after one confirm (o-df free NAME NAME... fills it)"},
@@ -180,13 +178,13 @@ func must(err error) {
 // quits. Space marks (the list noun's row); j/k move.
 func (a *App) bind() error {
 	r := a.r
-	r.Define("df").Mode("normal").
+	r.Define("df-page").Mode("normal").
 		Bind("R", ochazuke.Do("culprit.list")).
 		Bind("D", ochazuke.Do("culprit.clear-all").Hinted("clear all")).
 		Bind("q", ochazuke.Do("app.quit"))
 	r.Define("culprit").Mode("normal").
-		Bind("d d", ochazuke.Do("list.apply", ochazuke.Arguments{"verb": "clear"}).Hinted("clear")).
-		Bind("m", ochazuke.Do("list.apply", ochazuke.Arguments{"verb": "relocate"}).Hinted("relocate"))
+		Bind("d d", ochazuke.Do("collection.apply", ochazuke.Arguments{"verb": "clear"}).Hinted("clear")).
+		Bind("m", ochazuke.Do("collection.apply", ochazuke.Arguments{"verb": "relocate"}).Hinted("relocate"))
 	return nil
 }
 
@@ -261,7 +259,7 @@ func (a *App) culpritShow(c ochazuke.Ctx) ochazuke.Result {
 	return ochazuke.Pending(func(ctx context.Context) (any, error) { return Probe(ctx, a.Env, cu), nil })
 }
 
-// SizeResult is culprit size's answer.
+// SizeResult is the culprit size prop's answer.
 type SizeResult struct {
 	Name     string    `json:"name"`
 	Bytes    int64     `json:"bytes"`
@@ -270,15 +268,21 @@ type SizeResult struct {
 	LastUsed time.Time `json:"last_used,omitzero"`
 }
 
-func (a *App) culpritSize(c ochazuke.Ctx) ochazuke.Result {
-	cu, err := a.culprit(c)
-	if err != nil {
-		return ochazuke.Failed(err)
-	}
-	return ochazuke.Pending(func(ctx context.Context) (any, error) {
-		r := Probe(ctx, a.Env, cu)
-		return SizeResult{Name: r.Name, Bytes: r.Bytes, Human: Human(r.Bytes), Files: r.Files, LastUsed: r.LastUsed}, nil
-	})
+// sizeProp is the culprit's computed size prop: the probe's {name, bytes,
+// human, files, last_used}, read when asked for (get --prop size, o df
+// culprit size NAME), never in the rows.
+func (a *App) sizeProp() ochazuke.PropSpec {
+	return ochazuke.PropSpec{Name: "size", ReadOnly: true,
+		Parameter: ochazuke.Parameter{Type: ochazuke.PropObject, Description: "The culprit's size: {name, bytes, human, files, last_used}"},
+		Read: func(_ ochazuke.Ctx, th ochazuke.Thing) (any, error) {
+			name, _ := th["name"].(string)
+			cu, err := a.Cfg.Resolve(name)
+			if err != nil {
+				return nil, err
+			}
+			r := Probe(context.Background(), a.Env, cu)
+			return SizeResult{Name: r.Name, Bytes: r.Bytes, Human: Human(r.Bytes), Files: r.Files, LastUsed: r.LastUsed}, nil
+		}}
 }
 
 func (a *App) culpritClear(c ochazuke.Ctx) ochazuke.Result {
