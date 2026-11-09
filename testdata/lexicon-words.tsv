@@ -910,3 +910,11 @@ zoom	action	seed
 zoom-in	action	seed	
 zoom-out	action	seed	
 zoom-reset	action	seed	
+first	action	seed	ochazuke v0.110
+hide	action	seed	ochazuke v0.110
+last	action	seed	ochazuke v0.110
+move-down	action	seed	ochazuke v0.110
+move-up	action	seed	ochazuke v0.110
+referrer	noun	seed	ochazuke v0.110
+related	noun	seed	ochazuke v0.110
+related-section	noun	seed	ochazuke v0.110
