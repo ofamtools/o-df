@@ -54,6 +54,9 @@ type ClearResult struct {
 	Freed   int64    `json:"freed"`
 	Cleared []string `json:"cleared,omitempty"`
 	Ran     []string `json:"ran,omitempty"`
+	// Skipped are paths that could not be removed (permission denied, not
+	// ours); one failing path never stops the rest.
+	Skipped []string `json:"skipped,omitempty"`
 }
 
 // Clear empties a rebuildable culprit: its clear commands, else the
@@ -91,12 +94,16 @@ func Clear(ctx context.Context, env Env, c Culprit) (ClearResult, error) {
 		for _, p := range paths {
 			clear := emptyPath
 			if c.RemoveMatches {
-				clear = removeAll
+				clear = removeEntry
 			}
 			if err := clear(p); err != nil {
-				return res, err
+				res.Skipped = append(res.Skipped, p+": "+err.Error())
+				continue
 			}
 			res.Cleared = append(res.Cleared, p)
+		}
+		if len(res.Cleared) == 0 && len(res.Skipped) > 0 {
+			return res, fmt.Errorf("%s: nothing removed; skipped %d: %s", c.Name, len(res.Skipped), strings.Join(res.Skipped, "; "))
 		}
 	}
 	after := Probe(ctx, env, c)
@@ -168,6 +175,10 @@ func emptyPath(p string) error {
 	}
 	return errors.Join(errs...)
 }
+
+// removeEntry removes one matched path whole; a test replaces it so no real
+// removal can fail or run.
+var removeEntry = removeAll
 
 func removeAll(p string) error {
 	if err := os.RemoveAll(p); err == nil {

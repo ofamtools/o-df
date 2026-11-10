@@ -156,10 +156,57 @@ func (env Env) withSkipFrom(ctx context.Context, c Culprit) (Culprit, bool) {
 	return c, false
 }
 
-// leftOut is "skipped" when the row's skip or skip_with rules exclude m.
+// pathTypes are the kinds a row's types may name.
+var pathTypes = []string{"dir", "file", "symlink", "socket", "fifo", "device"}
+
+func pathType(mode fs.FileMode) string {
+	switch {
+	case mode&fs.ModeSymlink != 0:
+		return "symlink"
+	case mode.IsDir():
+		return "dir"
+	case mode&fs.ModeSocket != 0:
+		return "socket"
+	case mode&fs.ModeNamedPipe != 0:
+		return "fifo"
+	case mode&(fs.ModeDevice|fs.ModeCharDevice) != 0:
+		return "device"
+	}
+	return "file"
+}
+
+// ownedByMe is Env.Mine's default: the file's uid is the current user's.
+func ownedByMe(fi fs.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Getuid()
+}
+
+// leftOut is "skipped" when the row's owner, skip_hidden, types, skip or
+// skip_with rules exclude m.
 func (env Env) leftOut(c Culprit, m string, closed bool) string {
 	if closed {
 		return "skipped"
+	}
+	if c.SkipHidden && strings.HasPrefix(filepath.Base(m), ".") {
+		return "skipped"
+	}
+	if c.Owner != "" || len(c.Types) > 0 {
+		fi, err := os.Lstat(m)
+		if err != nil {
+			return "skipped"
+		}
+		if len(c.Types) > 0 && !slices.Contains(c.Types, pathType(fi.Mode())) {
+			return "skipped"
+		}
+		if c.Owner == "self" {
+			mine := env.Mine
+			if mine == nil {
+				mine = ownedByMe
+			}
+			if !mine(fi) {
+				return "skipped"
+			}
+		}
 	}
 	for _, g := range c.Skip {
 		if ok, _ := filepath.Match(g, filepath.Base(m)); ok {

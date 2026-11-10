@@ -300,7 +300,11 @@ func (a *App) culpritClear(c ochazuke.Ctx) ochazuke.Result {
 			return a.clearMany(ctx, plan), nil
 		}).Then(a.changed(func(v any) string {
 			res := v.(ClearManyResult)
-			return fmt.Sprintf("cleared %s, freed %s", culprits(len(res.Cleared)), Human(res.Freed))
+			msg := fmt.Sprintf("cleared %s, freed %s", culprits(len(res.Cleared)), Human(res.Freed))
+			if n := skippedPaths(res); n > 0 {
+				msg += fmt.Sprintf("; skipped %d paths (not yours / permission denied)", n)
+			}
+			return msg
 		}))
 	}
 	cu, err := a.culprit(c)
@@ -317,7 +321,11 @@ func (a *App) culpritClear(c ochazuke.Ctx) ochazuke.Result {
 		return Clear(ctx, a.Env, cu)
 	}).Then(a.changed(func(v any) string {
 		res := v.(ClearResult)
-		return "cleared " + res.Name + ", freed " + Human(res.Freed)
+		msg := "cleared " + res.Name + ", freed " + Human(res.Freed)
+		if len(res.Skipped) > 0 {
+			msg += fmt.Sprintf("; skipped %d paths (not yours / permission denied)", len(res.Skipped))
+		}
+		return msg
 	}))
 }
 
@@ -477,6 +485,15 @@ type ClearManyResult struct {
 	Freed   int64         `json:"freed"`
 }
 
+// skippedPaths counts the paths clearing could not remove, over every culprit.
+func skippedPaths(res ClearManyResult) int {
+	n := 0
+	for _, c := range res.Cleared {
+		n += len(c.Skipped)
+	}
+	return n
+}
+
 func (a *App) clearMany(ctx context.Context, plan ClearPlan) ClearManyResult {
 	res := ClearManyResult{Cleared: []ClearResult{}, Skipped: plan.Skipped}
 	for _, r := range plan.Clear {
@@ -486,6 +503,9 @@ func (a *App) clearMany(ctx context.Context, plan ClearPlan) ClearManyResult {
 			if one.Freed == 0 {
 				continue
 			}
+		}
+		if len(one.Skipped) > 0 {
+			res.Skipped = append(res.Skipped, fmt.Sprintf("%s: skipped %d paths: %s", r.Name, len(one.Skipped), strings.Join(one.Skipped, "; ")))
 		}
 		res.Cleared = append(res.Cleared, one)
 		res.Freed += one.Freed

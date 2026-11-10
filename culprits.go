@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -68,6 +69,14 @@ type Culprit struct {
 	// SkipWith are names that, found within three levels below a matched
 	// directory, leave it out (".git": a checkout is never scratch).
 	SkipWith []string `json:"skip_with,omitempty"`
+	// Owner, when "self", leaves out (state "skipped") a matched path that
+	// another user owns: o-df could not remove it, and it is not ours.
+	Owner string `json:"owner,omitempty"`
+	// SkipHidden leaves out a matched path whose name starts with a dot.
+	SkipHidden bool `json:"skip_hidden,omitempty"`
+	// Types, when set, are the kinds of matched path to keep (dir, file,
+	// symlink, socket, fifo, device); any other kind is left out.
+	Types []string `json:"types,omitempty"`
 	// RemoveMatches makes clear delete each matched path itself, not just
 	// its contents (a glob of scratch directories or staged files).
 	RemoveMatches bool `json:"remove_matches,omitempty"`
@@ -119,6 +128,9 @@ type Env struct {
 	// Tmp is what {tmp} stands for in a culprit path (the system scratch
 	// directory); DefaultEnv sets /private/tmp on macOS.
 	Tmp string
+	// Mine says whether the current user owns a path (the row's owner:
+	// "self"); nil reads the owner from the file system. A test sets a fake.
+	Mine func(fi fs.FileInfo) bool
 	// Now is the clock for min_age; nil is time.Now.
 	Now   func() time.Time
 	Query func(ctx context.Context, argv []string) ([]byte, error)
@@ -202,6 +214,19 @@ func merge(base, user Config, source string) Config {
 	return base
 }
 
+// validateMatchRules checks a row's owner and types.
+func validateMatchRules(c Culprit) error {
+	if c.Owner != "" && c.Owner != "self" {
+		return fmt.Errorf("culprit %q: owner %q is not \"self\"", c.Name, c.Owner)
+	}
+	for _, t := range c.Types {
+		if !slices.Contains(pathTypes, t) {
+			return fmt.Errorf("culprit %q: type %q is not one of %s", c.Name, t, strings.Join(pathTypes, ", "))
+		}
+	}
+	return nil
+}
+
 func validate(cfg Config) error {
 	for _, root := range cfg.ProjectRoots {
 		if strings.TrimSpace(root) == "" || strings.Contains(root, ProjectRootPlaceholder) {
@@ -227,6 +252,9 @@ func validate(cfg Config) error {
 			if _, err := ParseAge(c.MinAge); err != nil {
 				return fmt.Errorf("culprit %q: min_age: %w", c.Name, err)
 			}
+		}
+		if err := validateMatchRules(c); err != nil {
+			return err
 		}
 		if c.SkipFrom != nil && len(c.SkipFrom) == 0 {
 			return fmt.Errorf("culprit %q: an empty skip_from command", c.Name)

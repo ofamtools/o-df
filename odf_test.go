@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1025,5 +1028,140 @@ func TestSkipFromKeepsRunningServers(t *testing.T) {
 	i := slices.IndexFunc(cfg.Culprits, func(c Culprit) bool { return c.Name == "tuios-server-dirs" })
 	if r := Probe(context.Background(), env, cfg.Culprits[i]); r.Present {
 		t.Errorf("failed listing still offers %+v", r.Found)
+	}
+}
+
+// lane-scratch is narrowed by data: only entries the user owns, directories
+// and plain files, nothing hidden, no sockets, no lock files; others are
+// listed as skipped and never removed.
+func TestScratchRowLeavesOtherAppsAlone(t *testing.T) {
+	env := fixture(t)
+	tmp := t.TempDir()
+	env.Tmp = tmp
+	old := env.now().Add(-72 * time.Hour)
+	mkfile := func(rel string) string {
+		p := filepath.Join(tmp, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, bytes.Repeat([]byte("x"), 8<<10), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(p, old, old)
+		_ = os.Chtimes(filepath.Dir(p), old, old)
+		return p
+	}
+	mkfile("lane-mine/a")
+	mkfile("loose-file")
+	mkfile("theirs/a")
+	mkfile(".hidden.dylib")
+	mkfile("MozillaUpdateLock-ABC")
+	mkfile("thing.lock")
+	sock := filepath.Join(tmp, "app.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skip("no unix sockets:", err)
+	}
+	defer l.Close()
+	_ = os.Chtimes(sock, old, old)
+	mkfile("sock-named-dir/a")
+	env.Mine = func(fi fs.FileInfo) bool { return fi.Name() != "theirs" }
+
+	cfg, err := Load(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cfg.Resolve("lane-scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := Probe(context.Background(), env, c)
+	state := map[string]string{}
+	for _, f := range rep.Found {
+		state[filepath.Base(f.Path)] = f.State
+	}
+	for _, n := range []string{"lane-mine", "loose-file", "sock-named-dir"} {
+		if state[n] != "present" {
+			t.Errorf("%s: state %q, want present", n, state[n])
+		}
+	}
+	for _, n := range []string{"theirs", ".hidden.dylib", "MozillaUpdateLock-ABC", "thing.lock", "app.sock"} {
+		if state[n] != "skipped" {
+			t.Errorf("%s: state %q, want skipped", n, state[n])
+		}
+	}
+	out, err := run(t, env, "show", "lane-scratch")
+	if err != nil || !strings.Contains(out, "lane-mine") || !strings.Contains(out, "skipped") {
+		t.Errorf("show: %v\n%s", err, out)
+	}
+}
+
+// types and skip_hidden are plain row data on any culprit.
+func TestTypesAndHiddenAreRowData(t *testing.T) {
+	env := fixture(t)
+	dir := filepath.Join(env.Home, "pile")
+	for _, n := range []string{"d", ".h"} {
+		if err := os.MkdirAll(filepath.Join(dir, n), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := Culprit{Name: "pile", Paths: []string{"~/pile/*"}, Rebuildable: true, Types: []string{"file"}, SkipHidden: true, Owner: "self"}
+	rep := Probe(context.Background(), env, c)
+	got := map[string]string{}
+	for _, f := range rep.Found {
+		got[filepath.Base(f.Path)] = f.State
+	}
+	if got["f"] != "present" || got["d"] != "skipped" || got[".h"] != "skipped" {
+		t.Errorf("states %v", got)
+	}
+	env.Mine = func(fs.FileInfo) bool { return false }
+	if r := Probe(context.Background(), env, c); r.Present {
+		t.Error("owner self with nothing owned: want none present")
+	}
+	if err := validate(Config{Culprits: []Culprit{{Name: "x", Paths: []string{"/x"}, Owner: "root"}}}); err == nil {
+		t.Error("owner root accepted")
+	}
+	if err := validate(Config{Culprits: []Culprit{{Name: "x", Paths: []string{"/x"}, Types: []string{"pipe"}}}}); err == nil {
+		t.Error("unknown type accepted")
+	}
+}
+
+// A path that cannot be removed is skipped and reported; the rest are
+// still removed and the clear does not abort.
+func TestClearContinuesPastPermissionError(t *testing.T) {
+	env := fixture(t)
+	dir := filepath.Join(env.Home, "pile")
+	for _, n := range []string{"a", "b", "c"} {
+		if err := os.MkdirAll(filepath.Join(dir, n), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var tried []string
+	old := removeEntry
+	defer func() { removeEntry = old }()
+	removeEntry = func(p string) error {
+		tried = append(tried, filepath.Base(p))
+		if filepath.Base(p) == "b" {
+			return &fs.PathError{Op: "unlinkat", Path: p, Err: syscall.EACCES}
+		}
+		return nil
+	}
+	c := Culprit{Name: "pile", Paths: []string{"~/pile/*"}, Rebuildable: true, RemoveMatches: true}
+	res, err := Clear(context.Background(), env, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Cleared) != 2 || len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "permission denied") {
+		t.Errorf("cleared %v skipped %v", res.Cleared, res.Skipped)
+	}
+	if !slices.Equal(tried, []string{"a", "b", "c"}) {
+		t.Errorf("tried %v", tried)
+	}
+	removeEntry = func(p string) error { return syscall.EACCES }
+	if _, err := Clear(context.Background(), env, c); err == nil {
+		t.Error("every path failing: want an error")
 	}
 }
