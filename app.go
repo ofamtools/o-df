@@ -52,6 +52,7 @@ type App struct {
 	note    string // the last change's outcome, shown on the status line
 	listErr error
 	tui     bool
+	text    *string // a table answer for a person (scan, top), printed in place of the JSON
 
 	Stdin          io.Reader
 	Stdout, Stderr io.Writer
@@ -120,7 +121,9 @@ func (a *App) registerVerbs() {
 		Verb("list", a.culpritList, "every culprit with its size, biggest first: rows {noun, id: culprit/NAME, label, data: report, cells}; --all includes the absent ones").Rows("culprit").Fetch().Quiet().
 		Verb("names", a.culpritNames, "the culprit names a word may mean, for completion: every name for no query, else the one it resolves to (exact, alias or unique prefix) or the ones an ambiguous prefix shares: [{id: NAME, label: title}]").Fetch().Quiet().
 		Verb("show", a.culpritShow, "one culprit's row (paths, rebuildable, clear commands, advice) and every path it expands to, sized").Fetch().Quiet().Positional("name").
-		Verb("clear", a.culpritClear, "empty rebuildable culprits (their clear commands, else their paths' contents): NAME gives {name, before, after, freed}; --names or --all (every present rebuildable culprit, never one that is not rebuildable) ask once, listing each with its size and the total, and give {cleared, skipped, freed}").Confirm("Clear {{label}}? Its tool rebuilds it on demand.").Positional("name").Alias("free").
+		Verb("scan", a.culpritScan, "the culprits by size and the disk's totals: {disk, total, culprits}; --all includes the absent ones; --format table prints the table (the default at a terminal); the top-level word scan, and o-df with no command").Fetch().Quiet().
+		Verb("top", a.culpritTop, "the biggest directories and files under PATH (default .): one parallel walk, this volume only: {root, total, entries, seconds, partial}; --format table prints the table (the default at a terminal)").Fetch().Quiet().Positional("path").
+		Verb("clear", a.culpritClear, "empty rebuildable culprits (their clear commands, else their paths' contents): NAME gives {name, before, after, freed}; --names or --all (every present rebuildable culprit, never one that is not rebuildable) ask once, listing each with its size and the total, and give {cleared, skipped, freed}").Confirm("Clear {{label}}? Its tool rebuilds it on demand.").Positional("name", "more").Alias("free").
 		Verb("clear-all", a.culpritClearAll, "empty every present rebuildable culprit after one confirm listing each with its size and the total (clear --all; takes no name, so a key, the help or the palette never mixes it with the focused row): {cleared, skipped, freed}").Confirm("Clear every rebuildable culprit? Their tools rebuild them on demand.").
 		Verb("relocate", a.culpritRelocate, "copy a culprit's paths to TO/<path under home>, verify, delete the source; --link leaves a symlink: {name, dir, moved, freed}").Confirm("Relocate {{label}} (copy, verify, delete)?").Positional("name")
 	setHistory(r, ochazuke.HistoryChange, "culprit.clear", "culprit.clear-all", "culprit.relocate")
@@ -140,10 +143,26 @@ func (a *App) registerVerbs() {
 	set("culprit.names", "[{id, label}]", map[string]ochazuke.Parameter{
 		ochazuke.ChoicesQueryParameter: {Type: "string", Description: "the word typed so far"},
 	})
+	set("culprit.scan", "{disk, total, culprits}", map[string]ochazuke.Parameter{
+		"all":      {Type: "boolean", Description: "include culprits none of whose paths exist"},
+		"external": {Type: "boolean", Description: "also size paths that resolve onto another volume"},
+		"timeout":  {Type: "string", Description: "give up on a path whose walk takes longer (default 1m)"},
+		"format":   {Type: "string", Enum: []string{"json", "table"}, Description: "json (the value) or table; default table at a terminal"},
+	})
+	set("culprit.top", "{root, total, entries, seconds, partial}", map[string]ochazuke.Parameter{
+		"path":     {Type: "string", Description: "the directory to walk (default .)", Free: true},
+		"depth":    {Type: ochazuke.SettingInteger, Description: "report directories down to this many levels below PATH (default 2)"},
+		"n":        {Type: ochazuke.SettingInteger, Description: "keep this many entries (0: all; default 30)"},
+		"min":      {Type: "string", Description: "report files at least this big and drop smaller directories (default 100M)"},
+		"timeout":  {Type: "string", Description: "stop walking after this long and answer what was found, marked partial (default 5m)"},
+		"external": {Type: "boolean", Description: "allow a PATH on another volume"},
+		"format":   {Type: "string", Enum: []string{"json", "table"}, Description: "json (the value) or table; default table at a terminal"},
+	})
 	set("culprit.show", "report", map[string]ochazuke.Parameter{"name": name})
 	set("culprit.clear", "{name, before, after, freed} | {cleared, skipped, freed}", map[string]ochazuke.Parameter{
 		"name":  name,
 		"names": {Type: "array", Description: "several culprit names (each may be a unique prefix or an alias), cleared after one confirm (o-df free NAME NAME... fills it)"},
+		"more":  {Type: "string", Rest: true, Description: "further culprit names after the first (o-df free NAME NAME...)"},
 		"all":   {Type: "boolean", Description: "every present rebuildable culprit, after one confirm listing them; culprits that are not rebuildable (downloads, movies) are never included"},
 	})
 	set("culprit.clear-all", "{cleared, skipped, freed}", nil)
@@ -349,6 +368,9 @@ func clearArgs(args ochazuke.Arguments) (names []string, all bool) {
 		}
 	}
 	add(ochazuke.StringArg(args, "name", ""))
+	for _, n := range strings.Fields(ochazuke.StringArg(args, "more", "")) {
+		add(n)
+	}
 	switch v := args["names"].(type) {
 	case []string:
 		for _, n := range v {

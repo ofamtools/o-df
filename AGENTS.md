@@ -18,7 +18,7 @@ Plans and todos are kept outside this repository; do not add a TODO.md or docs/p
 | `App`, the runtime, the culprit verbs, key rows, rows and cells | `app.go` |
 | The page | `view.go` |
 | `tui`, `--smoke` | `tui.go` |
-| `main`, oden dispatch, `scan`, `top`, `free`/`delete` (culprit clear at the top level) | `main.go` |
+| `main`, oden dispatch (`tui` is the one command; `scan`, `top` and `free` are the verbs `culprit.scan`, `culprit.top` and `culprit.clear`'s alias) | `main.go`, `scan.go` |
 
 ## Invariants
 

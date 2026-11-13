@@ -7,6 +7,7 @@ about-page	noun	seed
 about-row	noun	seed	
 about-state	noun	seed	
 accept	action	seed	
+act	action	yes	act on the focused thing: pick one of its verbs (focus.act)
 action	noun	seed	
 action-item	noun	seed	
 actions	noun	seed	plural
@@ -60,6 +61,11 @@ behind	prop	seed
 binary	prop	seed	
 bind	action	seed	
 bind-key	action	seed	
+bind-start	action	seed	
+bind-finish	action	seed	
+bind-drop	action	seed	
+bind-literal	action	seed	
+bind-cancel	action	seed	
 binding	noun	seed	
 bindings	noun+prop	seed	
 bindings-help	noun	seed	
@@ -95,11 +101,11 @@ chip-toggle	action	seed
 choices	relation	seed	
 choose	action	seed	
 choose-column	action	seed	
+columns	action	seed	
 choose-move	action	seed	
 choose-pane	action	seed	
 choose-status	action	seed	
 clear	action	seed	
-clear-all	action	yes	lx8c-c
 clear-props	action	seed	
 clip	noun	seed	
 close	action	seed	
@@ -153,7 +159,6 @@ counts	relation	seed
 create	action	seed	
 created	prop	seed	
 created-by	prop	seed	
-culprit	noun	yes	lx8c-c
 current	prop	seed	
 current_pane	prop	seed	
 current_project	prop	seed	
@@ -194,7 +199,6 @@ detached	prop	seed
 detail	noun+prop	seed	
 detail-field	noun	seed	
 detail-link	noun	seed	
-df-page	noun	yes	lx8c-c
 diff	action	seed	
 dir	prop	seed	
 dir-search	noun	seed	
@@ -220,6 +224,7 @@ docs-viewer	noun	seed
 done	action	seed	
 done-hide	action	seed	
 done-show	action	seed	
+show-archived	action	seed	
 done-today	prop	seed	
 done-toggle	action	seed	
 done_when	prop	seed	
@@ -308,6 +313,7 @@ find	action	seed
 find-line	noun	seed	
 finish	action	seed	
 finished	prop	seed	
+first	action	seed	
 fit-column	action	seed	
 fit-columns	action	seed	
 flags	prop	seed	
@@ -327,7 +333,9 @@ form-chip	noun	lx4
 form-chips	noun	seed	
 form-choice	noun	seed	
 form-field	noun	seed	
+form-item	noun	yes	pp-library
 form-option	noun	seed	
+form-read-only	noun	yes	pp-library
 form-suggest	noun	seed	
 form-text	noun	seed	
 format	prop	seed	
@@ -342,6 +350,7 @@ goto	action	seed
 grid	noun	seed	
 group	action+prop	seed	
 group-clear	action	seed	
+group-fold	action	yes	fold or unfold a collection group
 grow	action	seed	
 guard	noun	seed	
 harness	noun+prop	seed	
@@ -351,6 +360,7 @@ head	prop	seed
 help	action	seed	
 helptext	prop	seed	
 hidden	prop	seed	
+hide	action	seed	
 hint	action+prop	seed	
 hints	action	seed	
 hints-cancel	action	seed	
@@ -371,7 +381,7 @@ import	action	seed
 in	action	seed	
 increase	action	seed	
 indent	action	seed	
-index	prop	seed	
+index	noun+prop	seed	
 info	prop	seed	
 init	action	seed	
 input	noun	seed	
@@ -389,6 +399,16 @@ into	action+prop	seed
 inventory	namespace+noun	seed	
 invert	action	seed	
 invert-condition	action	seed	
+item-add	action	yes	pp-library: list field rows (record_list.go)
+item-delete	action	yes	pp-library: list field rows (record_list.go)
+item-edit	action	yes	pp-library: list field rows (record_list.go)
+item-first	action	yes	pp-library: list field rows (record_list.go)
+item-last	action	yes	pp-library: list field rows (record_list.go)
+item-move-down	action	yes	pp-library: list field rows (record_list.go)
+item-move-up	action	yes	pp-library: list field rows (record_list.go)
+item-next	action	yes	pp-library: list field rows (record_list.go)
+item-previous	action	yes	pp-library: list field rows (record_list.go)
+item-yank	action	yes	pp-library: list field rows (record_list.go)
 job	noun+prop	seed	
 jobs	prop	seed	
 json	namespace+prop	seed	
@@ -404,6 +424,7 @@ label	prop	seed
 lane	namespace+noun	seed	
 lane_count	prop	seed	
 lanes	relation	seed	
+last	action	seed	
 last-done	prop	seed	
 last-error	prop	seed	
 last-outcome	prop	seed	
@@ -467,6 +488,8 @@ moot	action	seed
 more	prop	seed	
 motion	prop	seed	
 move	action	seed	
+move-down	action	seed	
+move-up	action	seed	
 moved	prop	seed	
 msg	prop	seed	
 multiply	action	seed	
@@ -482,6 +505,7 @@ next-missing	action	seed
 next-row	action	seed	
 next-run	prop	seed	
 next-same	action	seed	
+next-scope	action	seed	
 next-source	action	seed	
 normal	action	seed	
 note	action+noun+prop	seed	
@@ -493,6 +517,7 @@ notify	prop	seed
 notify-due	action	seed	
 notify-status	prop	seed	
 noun	action+noun+prop	seed	
+noun-browser	noun	seed	
 nouns	noun+prop	seed	
 observed_at	prop	seed	
 ochazuke	namespace	seed	
@@ -508,8 +533,10 @@ open-json	action	seed
 open-notes	action	seed	
 open-result-json	action	seed	
 open-transcript	action	seed	
+open-with	action	seed	
 open_notes	prop	seed	
 open_tasks	prop	seed	
+opener	noun	yes	the opener table (open.openers) and the OS opener
 opensPage	prop	seed	
 operation	noun	lx4	
 operations	noun	seed	plural
@@ -593,6 +620,7 @@ previous-class	action	seed
 previous-kind	action	seed	
 previous-link	action	seed	
 previous-same	action	seed	
+previous-scope	action	seed	
 previous-source	action	seed	
 privacy	prop	seed	
 private	prop	seed	
@@ -637,6 +665,7 @@ recheck	action	seed
 record	action	seed	
 redo	action	seed	
 ref	prop	seed	
+referrer	noun	seed	
 refresh	action	seed	
 refresh-turns	action	seed	
 refuse	action	seed	
@@ -644,8 +673,10 @@ register	action+noun	seed
 registers	prop	seed	
 registry	prop	seed	
 reject	action	seed	
+related	noun	seed	
+relation-kind	noun	yes	the declared rules of a relation kind (ochazuke.relation-kind)
+related-section	noun	seed	
 reload	action	seed	
-relocate	action	yes	lx8c-c
 reminder	noun	seed	
 remote	prop	seed	
 remotes	prop	seed	
@@ -818,6 +849,7 @@ text-view	noun	seed
 theme	prop	seed	
 themes	noun	seed	plural
 thinking	noun	seed	
+thing	noun	ua11	the registered thing walk graph picker
 tier	prop	seed	
 time	prop	seed	
 timeline	noun	seed	
@@ -888,6 +920,7 @@ vocabulary	prop	seed
 voice	noun	seed	
 wait	action	seed	
 waiting	action	seed	
+walk	action	ua11	follow a thing's values and relations in a picker
 watch	action	seed	
 watched	filter	seed	
 when	prop	seed	
@@ -910,11 +943,9 @@ zoom	action	seed
 zoom-in	action	seed	
 zoom-out	action	seed	
 zoom-reset	action	seed	
-first	action	seed	ochazuke v0.110
-hide	action	seed	ochazuke v0.110
-last	action	seed	ochazuke v0.110
-move-down	action	seed	ochazuke v0.110
-move-up	action	seed	ochazuke v0.110
-referrer	noun	seed	ochazuke v0.110
-related	noun	seed	ochazuke v0.110
-related-section	noun	seed	ochazuke v0.110
+clear-all	action	yes	lx8c-c
+culprit	noun	yes	lx8c-c
+df-page	noun	yes	lx8c-c
+relocate	action	yes	lx8c-c
+scan	action	yes	culprit.scan
+top	action	yes	culprit.top

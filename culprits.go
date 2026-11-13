@@ -114,6 +114,8 @@ type Env struct {
 	// External allows paths that resolve onto another volume than the
 	// home directory's (the culprits file's "external", --external).
 	External bool
+	// TTY says a person is at the terminal: scan and top default to their table.
+	TTY bool
 	// ProjectRoots fill {project_root} in culprit paths (the culprits
 	// file's "project_roots").
 	ProjectRoots []string
@@ -151,7 +153,7 @@ func DefaultEnv() Env {
 		}
 		file = filepath.Join(dir, "o-df", "culprits.json")
 	}
-	return Env{Home: home, UserFile: file, Run: ExecCommand, Query: ExecOutput, Tmp: defaultTmp()}
+	return Env{Home: home, UserFile: file, Run: ExecCommand, Query: ExecOutput, Tmp: defaultTmp(), TTY: stdoutIsTerminal()}
 }
 
 // Load merges the embedded defaults with the user's file (absent is fine)
@@ -345,4 +347,10 @@ func ParseAge(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("%q is not an age", s)
 	}
 	return d, nil
+}
+
+// stdoutIsTerminal reports whether standard output is a terminal.
+func stdoutIsTerminal() bool {
+	fi, err := os.Stdout.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }

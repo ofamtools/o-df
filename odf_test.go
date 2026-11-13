@@ -212,7 +212,7 @@ func TestScanJSONSortsBySizeAndHidesAbsent(t *testing.T) {
 
 func TestScanTable(t *testing.T) {
 	env := fixture(t)
-	out, err := run(t, env, "scan")
+	out, err := run(t, env, "scan", "--format", "table")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestRelocateRefusesSameVolumeAndExisting(t *testing.T) {
 
 func TestTopListsBiggestFirst(t *testing.T) {
 	env := fixture(t)
-	out, err := run(t, env, "top", env.Home, "--depth", "1", "--min", "1K", "--json")
+	out, err := run(t, env, "top", env.Home, "--depth", "1", "--min", "1K")
 	if err != nil {
 		t.Fatal(err, out)
 	}
@@ -623,7 +623,7 @@ func TestExternalOptIn(t *testing.T) {
 		t.Fatalf("row opt-in: bytes %d", r.Bytes)
 	}
 	userFile(t, env, `{"external": true, "project_roots": ["~/src"], "culprits": []}`)
-	out, err := run(t, env, "scan", "--json")
+	out, err := run(t, env, "scan")
 	if err != nil {
 		t.Fatal(err, out)
 	}
@@ -637,7 +637,7 @@ func TestExternalOptIn(t *testing.T) {
 
 func TestTopTimeoutIsPartial(t *testing.T) {
 	env := fixture(t)
-	out, err := run(t, env, "top", env.Home, "--timeout", "1ns", "--json")
+	out, err := run(t, env, "top", env.Home, "--timeout", "1ns")
 	if err != nil {
 		t.Fatal(err, out)
 	}
@@ -817,29 +817,15 @@ func TestFreeAndDeleteReachClear(t *testing.T) {
 	}
 }
 
-func TestHelpListsFreeBesideScan(t *testing.T) {
+func TestHelpListsScanAndTop(t *testing.T) {
 	out, err := run(t, fixture(t), "--help")
 	if err != nil {
 		t.Fatal(err)
 	}
 	disk, _, _ := strings.Cut(out, "Other:")
-	for _, want := range []string{"free, delete", "scan", "top", "culprit"} {
+	for _, want := range []string{"scan", "top", "culprit"} {
 		if !strings.Contains(disk, want) {
 			t.Errorf("the Disk group lacks %q:\n%s", want, disk)
-		}
-	}
-}
-
-func TestFreeArgs(t *testing.T) {
-	for in, want := range map[string]string{
-		"a":                      "a",
-		"a b --yes":              `--yes --names ["a","b"]`,
-		"--all --yes":            "--all --yes",
-		"--format table a b":     `--format table --names ["a","b"]`,
-		"a --target df/culprits": "a --target df/culprits",
-	} {
-		if got := strings.Join(freeArgs(strings.Fields(in)), " "); got != want {
-			t.Errorf("freeArgs(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -1163,5 +1149,35 @@ func TestClearContinuesPastPermissionError(t *testing.T) {
 	removeEntry = func(p string) error { return syscall.EACCES }
 	if _, err := Clear(context.Background(), env, c); err == nil {
 		t.Error("every path failing: want an error")
+	}
+}
+
+// scan, top and free are verbs of the culprit noun (culprit.scan,
+// culprit.top, culprit.clear's free), so the palette, MCP and keys reach
+// them; tui is the one command that opens the terminal page.
+func TestWordsAreVerbsNotCommands(t *testing.T) {
+	a, err := New(fixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"culprit.scan", "culprit.top", "culprit.free"} {
+		if _, ok := a.r.Operation(key); !ok {
+			t.Errorf("no %s", key)
+		}
+	}
+	out, err := run(t, fixture(t), "catalog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cat struct {
+		Commands []struct{ Name, Source string }
+	}
+	if err := json.Unmarshal([]byte(out), &cat); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cat.Commands {
+		if c.Source == "o-df" && c.Name != "tui" {
+			t.Errorf("command %s is not a verb", c.Name)
+		}
 	}
 }

@@ -33,8 +33,8 @@ mtm extension register df   # optional: the culprits page as an mtm tab
 
 ```sh
 o df                      # the same as o df scan
-o df scan [--all] [--json] [--timeout 60s] [--external]
-o df top [PATH] [--depth 2] [--n 30] [--min 100M] [--timeout 5m] [--external] [--json]
+o df scan [--all] [--format table] [--timeout 60s] [--external]
+o df top [PATH] [--depth 2] [--n 30] [--min 100M] [--timeout 5m] [--external] [--format table]
 o df culprit list [--all] [--format table]
 o df culprit show NAME
 o df culprit get NAME --prop size
@@ -54,7 +54,7 @@ path present, biggest first: name, size, rebuildable, when it was last used
 (the newest access or change time inside it), the advice (delete, relocate
 or keep) and its paths. A path that is a symlink shows as `path → target`
 and is not counted: it already lives elsewhere. `--all` lists absent
-culprits too; `--json` prints `{disk, total, culprits: [report...]}`.
+culprits too; the answer is JSON `{disk, total, culprits: [report...]}` (the verb `culprit scan`; `--format table` prints the table, the default at a terminal).
 
 Sizes are allocated bytes (`st_blocks`), as `du` counts them, so a sparse
 disk image counts what it uses. A hard-linked file counts once. A size
