@@ -949,3 +949,30 @@ df-page	noun	yes	lx8c-c
 relocate	action	yes	lx8c-c
 scan	action	yes	culprit.scan
 top	action	yes	culprit.top
+add-key	action	yes	give the help page row's verb another key (binding.bind)
+binding-file	noun	yes	the user's bindings.json as one thing: its text (binding_edit.go)
+capture-apply	action	yes	apply the help page edit on the keys captured
+capture-cancel	action	yes	leave the help page key capture
+capture-drop	action	yes	drop the last key captured for a help page edit
+capture-key	action	yes	add a pressed key to a help page edit
+capture-literal	action	yes	take the next key as it is in a help page capture
+cycle-mode	action	yes	walk the binding help page in the next mode
+drop	action	yes	remove a filter chip
+edit-fields	action	yes	edit a binding row's fields in a form from the help page
+explain	action	yes	follow a key along the walk and say why each row answers or not
+explain-key	action	yes	follow a typed key along the walk
+help-node	noun	yes	a node of the binding help page's rail
+help-page	noun	yes	the binding help page (help_page.go)
+help-page-state	noun	yes	the binding help page's state component
+help-row	noun	yes	a line of the binding help page's list
+jump	action	yes	go to a related thing's noun page (related-section.jump)
+look	action	yes	och-rail-focus: ochazuke.rail.look sets the rail's look (rail.look: full or float)
+narrow	action	yes	filter the binding help page to the selected row's verb, key, noun or level
+overlay	noun	yes	no-refusals N3: the framework overlay rows (ochazuke.overlay)
+rail	noun	yes	och-rail-focus: the rail region beside a page's main area (ochazuke.rail)
+rebind	action	yes	move a binding row to another key or change its fields (binding_edit.go)
+redirect	action	seed	
+refocus	action	yes	walk the binding help page from another focus
+resize	action	yes	och-rail-focus: ochazuke.rail.resize sets the rail's width (rail.width)
+show-file	action	yes	show the user's bindings.json and its changes from the help page
+unify	action	yes	one key for a verb on every noun that has it
