@@ -204,7 +204,7 @@ func (a *App) bind() error {
 	r.Define("culprit").Mode("normal").
 		Bind("d d", ochazuke.Do("collection.apply", ochazuke.Arguments{"verb": "clear"}).Hinted("clear")).
 		Bind("m", ochazuke.Do("collection.apply", ochazuke.Arguments{"verb": "relocate"}).Hinted("relocate"))
-	return nil
+	return loadDefaultBindings(r)
 }
 
 // culprit is the one a verb acts on: --name, else the targeted row's.

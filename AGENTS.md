@@ -16,6 +16,7 @@ Plans and todos are kept outside this repository; do not add a TODO.md or docs/p
 | Probing a culprit, sizes and ages as text | `probe.go` |
 | clear and relocate (copy, verify, delete, link), the home guard | `actions.go` |
 | `App`, the runtime, the culprit verbs, key rows, rows and cells | `app.go` |
+| Hidden default key rows as data (the run-3 key picker's), loaded after every verb is registered | `bindings.go`, `bindings.json` |
 | The page | `view.go` |
 | `tui`, `--smoke` | `tui.go` |
 | `main`, oden dispatch (`tui` is the one command; `scan`, `top` and `free` are the verbs `culprit.scan`, `culprit.top` and `culprit.clear`'s alias) | `main.go`, `scan.go` |

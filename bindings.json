@@ -1,0 +1,18 @@
+// o-df hidden default key rows (run-3 key picker)
+{
+  "bindings": [
+    {"context": "culprit/normal", "bindings": [
+      {"key": "d a", "action": "culprit.archive", "hidden": true},
+      {"key": "n", "action": "culprit.create", "hidden": true},
+      {"key": "r", "action": "culprit.edit", "hidden": true},
+      {"key": "M", "action": "culprit.get", "hidden": true},
+      {"key": "U", "action": "culprit.history", "hidden": true},
+      {"key": "b", "action": "culprit.names", "hidden": true},
+      {"key": "s", "action": "culprit.scan", "hidden": true},
+      {"key": "*", "action": "culprit.set", "hidden": true},
+      {"key": "e", "action": "culprit.top", "hidden": true},
+      {"key": "w", "action": "culprit.watch", "hidden": true},
+      {"key": "p", "action": "culprit.yank", "hidden": true}
+    ]}
+  ]
+}
