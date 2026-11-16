@@ -2,7 +2,6 @@
 {
   "bindings": [
     {"context": "culprit/normal", "bindings": [
-      {"key": "d a", "action": "culprit.archive", "hidden": true},
       {"key": "n", "action": "culprit.create", "hidden": true},
       {"key": "r", "action": "culprit.edit", "hidden": true},
       {"key": "M", "action": "culprit.get", "hidden": true},

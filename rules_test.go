@@ -7,11 +7,13 @@ import (
 )
 
 // TestRules runs ochazuke's hiddenkeys and deadkeys checks over o-df's
-// runtime: a hidden default row may not take a key that did something at
-// the same place without it. testdata/rules/places.json holds the places
-// of every noun as a running mtm recorded them (noun, ancestors, modal),
-// so the pages, trees and forms the fixture does not build are walked
-// too. The other checks have their own tests and baselines.
+// runtime: a hidden default row may not take a key that did something at the
+// same place without it. testdata/rules/places.json holds the places of every
+// noun as a running mtm recorded them (noun, ancestors, modal; the "df."
+// namespace is dropped from each noun, since mtm mounts the nouns with it and
+// this runtime names them without it), so the pages, trees and forms the
+// fixture does not build are walked too. The other checks have their own tests
+// and baselines.
 func TestRules(t *testing.T) {
 	a, err := New(fixture(t))
 	if err != nil {
