@@ -1181,3 +1181,72 @@ func TestWordsAreVerbsNotCommands(t *testing.T) {
 		}
 	}
 }
+
+// trimTree writes zero-byte files name -> age in days under HOME/bk and
+// returns the row for them; removal is faked, so nothing is deleted.
+func trimTree(t *testing.T, env Env, files map[string]int, row string) *[]string {
+	t.Helper()
+	dir := filepath.Join(env.Home, "bk")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for name, age := range files {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mt := now.Add(-time.Duration(age) * 24 * time.Hour)
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	userFile(t, env, `{"culprits": [{"name": "copies", "paths": ["~/bk/*"], "rebuildable": false, `+row+`}]}`)
+	return &[]string{}
+}
+
+func trimmed(t *testing.T, env Env, removed *[]string, args ...string) []string {
+	t.Helper()
+	env.Remove = func(p string) error { *removed = append(*removed, filepath.Base(p)); return nil }
+	if out, err := run(t, env, append([]string{"culprit", "trim", "copies"}, args...)...); err != nil {
+		t.Fatal(err, out)
+	}
+	got := slices.Clone(*removed)
+	slices.Sort(got)
+	return got
+}
+
+func TestTrimRowFields(t *testing.T) {
+	files := map[string]int{"a.bak-3": 3, "a.bak-2": 2, "a.bak-1": 1, "b.bak-9": 9, "b.bak-8": 8, "odd": 99}
+	cases := []struct {
+		name, row string
+		want      []string
+	}{
+		{"keep per group", `"keep": 1, "group": "^(.+)\\.bak-"`, []string{"a.bak-2", "a.bak-3", "b.bak-9"}},
+		{"days", `"days": 5`, []string{"b.bak-8", "b.bak-9", "odd"}},
+		{"min_keep beats days", `"days": 5, "min_keep": 1, "group": "^(.+)\\.bak-"`, []string{"b.bak-9"}},
+		{"keep one group without a pattern", `"keep": 2`, []string{"a.bak-3", "b.bak-8", "b.bak-9", "odd"}},
+		{"both zero trims nothing", `"min_keep": 1`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := fixture(t)
+			removed := trimTree(t, env, files, c.row)
+			if got := trimmed(t, env, removed, "--yes"); !slices.Equal(got, c.want) {
+				t.Fatalf("removed %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestTrimDryRunRemovesNothing(t *testing.T) {
+	env := fixture(t)
+	removed := trimTree(t, env, map[string]int{"a.bak-1": 1, "a.bak-9": 9}, `"days": 5`)
+	if got := trimmed(t, env, removed, "--dry-run"); len(got) != 0 {
+		t.Fatalf("a dry run removed %v", got)
+	}
+	out, err := run(t, env, "culprit", "trim", "copies", "--dry-run")
+	if err != nil || !strings.Contains(out, "a.bak-9") || strings.Contains(out, "a.bak-1\"") {
+		t.Fatalf("dry run: %v %s", err, out)
+	}
+}

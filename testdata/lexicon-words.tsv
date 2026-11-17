@@ -976,3 +976,4 @@ refocus	action	yes	walk the binding help page from another focus
 resize	action	yes	och-rail-focus: ochazuke.rail.resize sets the rail's width (rail.width)
 show-file	action	yes	show the user's bindings.json and its changes from the help page
 unify	action	yes	one key for a verb on every noun that has it
+trim	action	yes	remove the files a retention rule (keep, days, group, min_keep) says to remove

@@ -80,6 +80,18 @@ type Culprit struct {
 	// RemoveMatches makes clear delete each matched path itself, not just
 	// its contents (a glob of scratch directories or staged files).
 	RemoveMatches bool `json:"remove_matches,omitempty"`
+	// Keep, Days, Group and MinKeep make the row trimmable (trim.go): the
+	// files its paths match are grouped by Group (a regular expression
+	// matched on the base name; its first group names the group; empty:
+	// one group), and in each group, newest first by modification time, a
+	// file goes when it is beyond the newest Keep or older than Days days,
+	// unless it is among the newest MinKeep. Keep and Days of 0 set no
+	// limit; both 0 means the row trims nothing. A name Group does not
+	// match is never trimmed.
+	Keep    int    `json:"keep,omitempty"`
+	Days    int    `json:"days,omitempty"`
+	Group   string `json:"group,omitempty"`
+	MinKeep int    `json:"min_keep,omitempty"`
 	// Recommend is the advice the scan prints: delete, relocate or keep.
 	Recommend string `json:"recommend,omitempty"`
 	Notes     string `json:"notes,omitempty"`
@@ -124,6 +136,10 @@ type Env struct {
 	// that records the argv and runs nothing. With none set, Clear runs a
 	// command only when Home is the real home directory (CommandRunner).
 	Run func(ctx context.Context, argv []string) ([]byte, error)
+	// Remove deletes one path for trim. DefaultEnv sets os.RemoveAll; a test
+	// sets a fake that records and removes nothing. With none set, trim
+	// removes only when Home is the real home directory (RemoveFunc).
+	Remove func(path string) error
 	// Query runs a read-only command for a row's paths_from and returns
 	// its stdout. DefaultEnv sets ExecOutput; a test sets a fake. With
 	// none set, paths_from is not asked and the row's Paths stand.
@@ -153,7 +169,7 @@ func DefaultEnv() Env {
 		}
 		file = filepath.Join(dir, "o-df", "culprits.json")
 	}
-	return Env{Home: home, UserFile: file, Run: ExecCommand, Query: ExecOutput, Tmp: defaultTmp(), TTY: stdoutIsTerminal()}
+	return Env{Home: home, UserFile: file, Run: ExecCommand, Remove: os.RemoveAll, Query: ExecOutput, Tmp: defaultTmp(), TTY: stdoutIsTerminal()}
 }
 
 // Load merges the embedded defaults with the user's file (absent is fine)
@@ -263,6 +279,9 @@ func validate(cfg Config) error {
 		}
 		if c.PathsFrom != nil && len(c.PathsFrom) == 0 {
 			return fmt.Errorf("culprit %q: an empty paths_from command", c.Name)
+		}
+		if err := validateRetention(c); err != nil {
+			return err
 		}
 		for _, cmd := range c.Clear {
 			if len(cmd) == 0 {

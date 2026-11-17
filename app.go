@@ -125,8 +125,9 @@ func (a *App) registerVerbs() {
 		Verb("top", a.culpritTop, "the biggest directories and files under PATH (default .): one parallel walk, this volume only: {root, total, entries, seconds, partial}; --format table prints the table (the default at a terminal)").Fetch().Quiet().Positional("path").
 		Verb("clear", a.culpritClear, "empty rebuildable culprits (their clear commands, else their paths' contents): NAME gives {name, before, after, freed}; --names or --all (every present rebuildable culprit, never one that is not rebuildable) ask once, listing each with its size and the total, and give {cleared, skipped, freed}").Confirm("Clear {{label}}? Its tool rebuilds it on demand.").Positional("name", "more").Alias("free").
 		Verb("clear-all", a.culpritClearAll, "empty every present rebuildable culprit after one confirm listing each with its size and the total (clear --all; takes no name, so a key, the help or the palette never mixes it with the focused row): {cleared, skipped, freed}").Confirm("Clear every rebuildable culprit? Their tools rebuild them on demand.").
+		Verb("trim", a.culpritTrim, "remove the files a row's retention rule (keep, days, group, min_keep) says to remove, never the whole culprit; --dry-run lists them without asking; applying asks first, listing each file: {name, dry_run, remove, kept, bytes, freed}").Positional("name").
 		Verb("relocate", a.culpritRelocate, "copy a culprit's paths to TO/<path under home>, verify, delete the source; --link leaves a symlink: {name, dir, moved, freed}").Confirm("Relocate {{label}} (copy, verify, delete)?").Positional("name")
-	setHistory(r, ochazuke.HistoryChange, "culprit.clear", "culprit.clear-all", "culprit.relocate")
+	setHistory(r, ochazuke.HistoryChange, "culprit.clear", "culprit.clear-all", "culprit.trim", "culprit.relocate")
 	// A name may be abbreviated (a unique prefix or an alias), so it is
 	// Free: the verb resolves it and refuses an ambiguous or unknown one;
 	// culprit.names lists what the typed word may mean.
@@ -166,6 +167,10 @@ func (a *App) registerVerbs() {
 		"all":   {Type: "boolean", Description: "every present rebuildable culprit, after one confirm listing them; culprits that are not rebuildable (downloads, movies) are never included"},
 	})
 	set("culprit.clear-all", "{cleared, skipped, freed}", nil)
+	set("culprit.trim", "{name, dry_run, remove, kept, bytes, freed}", map[string]ochazuke.Parameter{
+		"name":    name,
+		"dry-run": {Type: "boolean", Description: "list what the row's rule would remove and its bytes; nothing is removed and nothing is asked"},
+	})
 	set("culprit.relocate", "{name, dir, moved, freed}", map[string]ochazuke.Parameter{
 		"name":        name,
 		"to":          {Type: "string", Description: "the destination root (default: relocate_to in the culprits file; with neither, relocate fails)"},
@@ -182,6 +187,7 @@ func (a *App) registerVerbs() {
 	must(r.AddVerbCheck("culprit.clear-all", ochazuke.VerbCheck{Name: "clear-many", Check: func(r *ochazuke.Runtime, cx ochazuke.Context, args ochazuke.Arguments) ochazuke.Verdict {
 		return a.checkClear(r, cx, allArgs(args))
 	}}))
+	must(r.AddVerbCheck("culprit.trim", ochazuke.VerbCheck{Name: "trim-ask", Check: a.checkTrim}))
 	must(r.AddVerbCheck("culprit.relocate", ochazuke.VerbCheck{Name: "destination", Check: a.checkRelocate}))
 }
 
@@ -352,6 +358,49 @@ func (a *App) culpritClear(c ochazuke.Ctx) ochazuke.Result {
 func (a *App) culpritClearAll(c ochazuke.Ctx) ochazuke.Result {
 	c.Args = allArgs(c.Args)
 	return a.culpritClear(c)
+}
+
+// culpritTrim removes what the row's rule says (or lists it with --dry-run).
+func (a *App) culpritTrim(c ochazuke.Ctx) ochazuke.Result {
+	cu, err := a.culprit(c)
+	if err != nil {
+		return ochazuke.Failed(err)
+	}
+	if dry, _ := c.Args["dry-run"].(bool); dry {
+		return ochazuke.Pending(func(ctx context.Context) (any, error) {
+			return PlanTrim(ctx, a.Env, cu)
+		})
+	}
+	return ochazuke.Pending(func(ctx context.Context) (any, error) {
+		return Trim(ctx, a.Env, cu)
+	}).Then(a.changed(func(v any) string {
+		res := v.(TrimResult)
+		return fmt.Sprintf("trimmed %s: removed %d files, freed %s", res.Name, len(res.Remove), Human(res.Freed))
+	}))
+}
+
+// checkTrim asks before an applying trim lists what goes; a dry run, or a
+// rule that removes nothing, asks nothing.
+func (a *App) checkTrim(_ *ochazuke.Runtime, _ ochazuke.Context, args ochazuke.Arguments) ochazuke.Verdict {
+	if dry, _ := args["dry-run"].(bool); dry {
+		return ochazuke.Allow()
+	}
+	n := ochazuke.StringArg(args, "name", "")
+	if n == "" {
+		return ochazuke.AskFirst("Trim the focused culprit by its retention rule?")
+	}
+	cu, err := a.Cfg.Resolve(n)
+	if err != nil {
+		return ochazuke.Refuse(err.Error())
+	}
+	plan, err := PlanTrim(context.Background(), a.Env, cu)
+	switch {
+	case err != nil:
+		return ochazuke.Refuse(err.Error())
+	case len(plan.Remove) == 0:
+		return ochazuke.Allow()
+	}
+	return ochazuke.AskFirst(plan.Prompt())
 }
 
 // allArgs is args as clear --all: the all flag only.

@@ -227,6 +227,7 @@ A culprit row's fields:
 | `remove_matches` | clear deletes each matched path itself, not only its contents; a path that cannot be removed (permission denied) is reported under `skipped` and the rest still go |
 | `size` | a command whose stdout's first integer is the size in bytes, instead of walking `paths` |
 | `clear` | commands (each an argv) instead of removing the paths' contents; a command holding `{path}` runs once per present path |
+| `keep`, `days`, `group`, `min_keep` | retention for `culprit trim` (works on a row that is not rebuildable): the matched files are grouped by `group` (a regular expression on the base name; its first capture names the group; empty: one group; a name it does not match is never trimmed); in each group, newest first by modification time, a file goes when it is beyond the newest `keep` or older than `days` days, unless it is among the newest `min_keep`. `keep` and `days` of 0 set no limit; both 0 trims nothing. `o df culprit trim NAME --dry-run` lists what goes and its bytes and asks nothing; without `--dry-run` it lists them and asks (`--yes` answers; an agent is refused) |
 | `recommend` | `delete`, `relocate` or `keep`: the advice the scan prints |
 | `external` | allow paths that resolve onto another volume (top level: every row and `top`) |
 | `disabled` | drop a default row |
