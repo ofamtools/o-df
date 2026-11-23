@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	charm.land/bubbletea/v2 v2.1.0
 	ofam.dev/ochazuke v1.0.0
-	ofam.dev/oden v1.0.0
+	ofam.dev/oden v1.1.0
 )
 
 require (

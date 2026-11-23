@@ -40,5 +40,5 @@ golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=
 golang.org/x/sys v0.47.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
 ofam.dev/ochazuke v1.0.0 h1:+SRJob38ZeuDnG6DOSU5fzh1EvSNOSE3HxIyWiLqwdU=
 ofam.dev/ochazuke v1.0.0/go.mod h1:OOD1WeR/SeBJw9RXgw7E+UYVBDJLdkB4prpjjny8b1I=
-ofam.dev/oden v1.0.0 h1:KLaNB0A/1vQeYcp+bYsbO3JMPVTPpHEFo08yI3xQ4fQ=
-ofam.dev/oden v1.0.0/go.mod h1:rrwipKr19istfFQO+6xaj0gRKlXz2tOOiC50M1twDPc=
+ofam.dev/oden v1.1.0 h1:F9TH/7ehRgACET3pmIGP5AxE6sr6Lu/h2oWA2jc7E4c=
+ofam.dev/oden v1.1.0/go.mod h1:rrwipKr19istfFQO+6xaj0gRKlXz2tOOiC50M1twDPc=

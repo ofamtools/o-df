@@ -278,58 +278,7 @@ func newOdenApp(args []string, env Env, stdin io.Reader, stdout, stderr io.Write
 
 func dfExtManifest() *oden.ExtManifest {
 	m := catalogManifest()
-	schemas := make([]oden.ExtSchema, 0, len(m.Schemas))
-	for _, s := range m.Schemas {
-		fields := make([]oden.ExtField, 0, len(s.Fields))
-		for _, f := range s.Fields {
-			fields = append(fields, oden.ExtField{
-				Name:        f.Name,
-				Type:        string(f.Type),
-				Required:    f.Required,
-				Description: f.Description,
-				Enum:        f.Enum,
-				Default:     f.Default,
-				RefKinds:    f.RefKinds,
-			})
-		}
-		schemas = append(schemas, oden.ExtSchema{
-			Kind:           s.Kind,
-			Title:          s.Title,
-			Plural:         s.Plural,
-			Fields:         fields,
-			DefaultColumns: s.DefaultColumns,
-			SummaryField:   s.SummaryField,
-			UniqueFields:   s.UniqueFields,
-		})
-	}
-	cmds := make([]oden.ExtCommand, 0, len(m.Commands))
-	for _, cmd := range m.Commands {
-		params := make([]oden.ExtField, 0, len(cmd.Params))
-		for _, p := range cmd.Params {
-			params = append(params, oden.ExtField{
-				Name:        p.Name,
-				Type:        string(p.Type),
-				Required:    p.Required,
-				Description: p.Description,
-				Enum:        p.Enum,
-				Default:     p.Default,
-				RefKinds:    p.RefKinds,
-			})
-		}
-		cmds = append(cmds, oden.ExtCommand{
-			ID:          cmd.ID,
-			Description: cmd.Description,
-			Params:      params,
-			Tags:        cmd.Tags,
-			Meta:        cmd.Meta,
-		})
-	}
-	return &oden.ExtManifest{
-		Name:     m.Name,
-		Version:  m.Version,
-		Schemas:  schemas,
-		Commands: cmds,
-	}
+	return &m
 }
 
 // QueryTimeout bounds disk sizing during `o-df query` so catalog hosts never hang.

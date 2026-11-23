@@ -17,6 +17,7 @@ import (
 
 	"ofam.dev/ochazuke/config"
 	"ofam.dev/ochazuke/core"
+	"ofam.dev/oden"
 )
 
 // Every test runs against a temp HOME with a fixture of caches; nothing
@@ -1313,14 +1314,21 @@ func TestCatalogSizeSchemaSizedQueryAndNonInteractiveClean(t *testing.T) {
 	if !slices.Equal(sc.DefaultColumns, wantCols) {
 		t.Fatalf("defaultColumns = %v, want %v", sc.DefaultColumns, wantCols)
 	}
-	fieldTypes := map[string]core.ParamType{}
+	wantStyleRules := []oden.ExtStyleRule{
+		{When: `fields.rebuildable == true && fields.recommend == "delete"`, Target: "recommend", Tone: "success"},
+		{When: `fields.rebuildable == false`, Target: "rebuildable", Tone: "muted"},
+	}
+	if !slices.Equal(sc.StyleRules, wantStyleRules) {
+		t.Fatalf("styleRules = %+v, want %+v", sc.StyleRules, wantStyleRules)
+	}
+	fieldTypes := map[string]string{}
 	for _, f := range sc.Fields {
 		fieldTypes[f.Name] = f.Type
 	}
-	if fieldTypes["size"] != core.ParamString || fieldTypes["sizeBytes"] != core.ParamInt || fieldTypes["rebuildable"] != core.ParamBool {
+	if fieldTypes["size"] != string(core.ParamString) || fieldTypes["sizeBytes"] != string(core.ParamInt) || fieldTypes["rebuildable"] != string(core.ParamBool) {
 		t.Fatalf("unexpected field types: size=%q sizeBytes=%q rebuildable=%q", fieldTypes["size"], fieldTypes["sizeBytes"], fieldTypes["rebuildable"])
 	}
-	var cleanSpec *core.CommandSpec
+	var cleanSpec *oden.ExtCommand
 	for i := range m.Commands {
 		if m.Commands[i].ID == "df.culprit.clean" {
 			cleanSpec = &m.Commands[i]
@@ -1330,21 +1338,66 @@ func TestCatalogSizeSchemaSizedQueryAndNonInteractiveClean(t *testing.T) {
 	if cleanSpec == nil {
 		t.Fatalf("catalog commands lack df.culprit.clean: %+v", m.Commands)
 	}
-	argv, _ := cleanSpec.Meta["argv"].([]any)
-	if len(argv) != 2 || argv[0] != "o-df" || argv[1] != "clean" {
-		t.Fatalf("df.culprit.clean meta.argv = %#v, want [o-df clean]", cleanSpec.Meta["argv"])
+	if cleanSpec.Description != "Free disk space for a rebuildable culprit via o-df clean --yes" {
+		t.Fatalf("df.culprit.clean description = %q", cleanSpec.Description)
 	}
-	hasName, hasYes := false, false
+	if !slices.Equal(cleanSpec.Kinds, []string{CulpritKind}) {
+		t.Fatalf("df.culprit.clean kinds = %v, want [%s]", cleanSpec.Kinds, CulpritKind)
+	}
+	if !slices.Equal(cleanSpec.Tags, []string{"o-df", "editing", "destructive"}) {
+		t.Fatalf("df.culprit.clean tags = %v, want [o-df editing destructive]", cleanSpec.Tags)
+	}
+	if cleanSpec.Key != "X" || cleanSpec.KeyHint != "clean culprit" {
+		t.Fatalf("df.culprit.clean key/keyHint = %q/%q, want X/clean culprit", cleanSpec.Key, cleanSpec.KeyHint)
+	}
+	wantExecArgv := []string{"{{binary}}", "clean", "{{name|title|id}}", "--yes"}
+	if cleanSpec.Exec == nil ||
+		!slices.Equal(cleanSpec.Exec.Argv, wantExecArgv) ||
+		cleanSpec.Exec.Title != "o-df clean {{name|title|id}}" ||
+		!slices.Equal(cleanSpec.Exec.RefreshKinds, []string{CulpritKind}) {
+		t.Fatalf("df.culprit.clean exec = %+v", cleanSpec.Exec)
+	}
+	if cleanSpec.Guard == nil ||
+		cleanSpec.Guard.When != "fields.rebuildable == true" ||
+		cleanSpec.Guard.RefuseMessage != "Cannot clean {{name|title|id}}: culprit is not rebuildable" ||
+		cleanSpec.Guard.HideWhenFalse {
+		t.Fatalf("df.culprit.clean guard = %+v", cleanSpec.Guard)
+	}
+	wantConfirm := oden.ExtCommandConfirm{
+		Title:   "Clean {{name|title|id}}",
+		Message: "Free {{sizeHuman|size|'space'}} from {{name|title|id}} via o-df clean --yes?",
+		Label:   "Clean",
+		Tone:    "warning",
+	}
+	if cleanSpec.Confirm == nil || *cleanSpec.Confirm != wantConfirm {
+		t.Fatalf("df.culprit.clean confirm = %+v, want %+v", cleanSpec.Confirm, wantConfirm)
+	}
+	wantFeedback := oden.ExtCommandFeedback{
+		Running: "Cleaning {{name|title|id}}...",
+		Success: "Freed {{sizeHuman|size|'space'}} from {{name|title|id}}",
+		Failure: "o-df clean {{name|title|id}} failed",
+	}
+	if cleanSpec.Feedback == nil || *cleanSpec.Feedback != wantFeedback {
+		t.Fatalf("df.culprit.clean feedback = %+v, want %+v", cleanSpec.Feedback, wantFeedback)
+	}
+	argv, _ := cleanSpec.Meta["argv"].([]any)
+	if len(argv) != 2 || argv[0] != "o-df" || argv[1] != "clean" || cleanSpec.Meta["destructive"] != true || cleanSpec.Meta["confirm"] != true {
+		t.Fatalf("df.culprit.clean meta = %#v", cleanSpec.Meta)
+	}
+	hasName, hasAll, hasYes := false, false, false
 	for _, p := range cleanSpec.Params {
 		if p.Name == "name" && p.Required {
 			hasName = true
 		}
-		if p.Name == "yes" && p.Type == core.ParamBool {
+		if p.Name == "all" && p.Type == string(core.ParamBool) {
+			hasAll = true
+		}
+		if p.Name == "yes" && p.Type == string(core.ParamBool) {
 			hasYes = true
 		}
 	}
-	if !hasName || !hasYes {
-		t.Fatalf("df.culprit.clean params missing name/yes: %+v", cleanSpec.Params)
+	if !hasName || !hasAll || !hasYes {
+		t.Fatalf("df.culprit.clean params missing name/all/yes: %+v", cleanSpec.Params)
 	}
 
 	// 2. Default `query --kind df.culprit` returns live measured disk sizes sorted biggest-first.
