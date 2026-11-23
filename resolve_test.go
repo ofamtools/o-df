@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"ofam.dev/ochazuke"
-	ocli "ofam.dev/ochazuke/cli"
 	"os"
 	"path/filepath"
 	"slices"
@@ -221,15 +219,10 @@ func TestNameChoicesForPalette(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	param := a.r.Operations.At(ochazuke.Key(a.r.CanonicalKey("culprit.clear"))).Parameters["name"]
 	ids := func(word string) []string {
-		choices, err := a.r.ChoicesFor(a.r.Context(), param, word)
-		if err != nil {
-			t.Fatal(err)
-		}
 		var out []string
-		for _, c := range choices {
-			out = append(out, c.ID)
+		for _, c := range a.Cfg.Candidates(word) {
+			out = append(out, c.Name)
 		}
 		return out
 	}
@@ -250,15 +243,17 @@ func TestNameChoicesForPalette(t *testing.T) {
 }
 
 func TestCatalogDeclaresSingularNamespace(t *testing.T) {
-	var doc ocli.CatalogDoc
-	if err := json.Unmarshal([]byte(catalogJSON(t)), &doc); err != nil {
+	var m Manifest
+	if err := json.Unmarshal([]byte(catalogJSON(t)), &m); err != nil {
 		t.Fatal(err)
 	}
-	if doc.Namespace != "df" || ochazuke.DefaultNamespace != "df" {
-		t.Fatalf("catalog namespace %q, default %q; want df", doc.Namespace, ochazuke.DefaultNamespace)
+	if m.Name != "o-df" || len(m.Schemas) != 1 || m.Schemas[0].Kind != "df.culprit" {
+		t.Fatalf("catalog manifest %+v; want o-df / df.culprit", m)
 	}
-	if got, err := ocli.CatalogNamespace(doc, "o-df"); err != nil || got != "df" {
-		t.Fatal(got, err)
+	for _, c := range m.Commands {
+		if !strings.HasPrefix(c.ID, "df.") {
+			t.Errorf("command %q lacks df. namespace prefix", c.ID)
+		}
 	}
 }
 

@@ -2,258 +2,42 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"slices"
 	"strings"
 	"time"
-
-	"ofam.dev/ochazuke"
-	ocli "ofam.dev/ochazuke/cli"
 )
 
-// The application: one ochazuke runtime holding the culprit list and the
-// culprit noun's verbs, used by the command line (the shell runs one verb
-// and settles it) and by the TUI. What o-df read from the disk is the
-// list's rows; the runtime holds interaction state only.
-
-const (
-	pageID     = "df"
-	culpritsID = "df/culprits"
-)
+// The application: what o-df read from the culprits file and the
+// environment it acts in, shared by the command line (cli.go) and the
+// culprits page (page.go). Every operation here is plain Go over the
+// domain (probe, clear, trim, relocate); the confirm wording lives here so
+// the command line and the page ask the same question.
 
 // Version is the catalog's version.
-const Version = "0.1.0"
-
-var culpritColumns = []ochazuke.Column{
-	{Title: "culprit", Min: 12},
-	{Title: "size", Align: ochazuke.AlignRight, Priority: 1},
-	{Title: "rebuild", Priority: 2},
-	{Title: "used", Align: ochazuke.AlignRight, Priority: 3},
-	{Title: "advice", Priority: 4},
-	{Title: "path", Priority: 5},
-}
+const Version = "0.2.0"
 
 // App is o-df's state.
 type App struct {
-	r    *ochazuke.Runtime
-	m    *ochazuke.Model
-	list *ochazuke.Collection
-
 	Env Env
 	Cfg Config
 	Now func() time.Time
-
-	reports []Report
-	disk    Disk
-	loading string
-	note    string // the last change's outcome, shown on the status line
-	listErr error
-	tui     bool
-	text    *string // a table answer for a person (scan, top), printed in place of the JSON
 
 	Stdin          io.Reader
 	Stdout, Stderr io.Writer
 }
 
-// Namespace is the singular namespace o-df declares (lexicon plan): its
-// operations are df.<noun>.<verb> and a host mounts its catalog under it.
-const Namespace = "df"
-
-func init() {
-	if err := ochazuke.DeclareNamespace(Namespace); err != nil {
-		panic(err)
-	}
-}
-
-// New builds the runtime: the page holding the culprit list, the noun
-// with its columns, verbs and bindings, and the model.
+// New loads the culprits file for env.
 func New(env Env) (*App, error) {
 	cfg, err := Load(env)
 	if err != nil {
 		return nil, err
 	}
-	r := ochazuke.NewRuntime()
 	env.External = env.External || cfg.External
 	env.ProjectRoots = cfg.ProjectRoots
-	a := &App{r: r, Env: env, Cfg: cfg, Now: time.Now, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
-	r.Instance(pageID, ochazuke.Kind("df-page"))
-	if a.list, err = r.AddList(culpritsID, nil, ochazuke.Parent(pageID), ochazuke.Columns(culpritColumns...)); err != nil {
-		return nil, err
-	}
-	r.Define("culprit").Main().Columns(culpritColumns...).Props(append(culpritProps(), a.sizeProp())...).Store(a.culpritStore())
-	a.registerVerbs()
-	a.m = ochazuke.NewModel(r)
-	a.m.Title = "o-df"
-	if err := a.bind(); err != nil {
-		return nil, err
-	}
-	// Declared as a data page so a host's catalog can draw the list; the
-	// TUI draws it itself (render).
-	if err := ocli.DeclarePage(r, ocli.CatalogPage{
-		ID: pageID, Title: "Disk", Layout: ocli.LayoutSplit,
-		Lists:  []ocli.CatalogList{{ID: culpritsID, Noun: "culprit", Title: "Culprits"}},
-		Detail: &ocli.CatalogDetail{Fields: []string{"name", "title", "bytes", "files", "last_used", "rebuildable", "rebuild", "recommend", "notes", "paths", "found"}},
-	}); err != nil {
-		return nil, err
-	}
-	page := r.PageOf(pageID)
-	page.Render, page.Focus, page.Remembered = a.render, culpritsID, culpritsID
-	if err := r.OpenPage(pageID); err != nil {
-		return nil, err
-	}
-	return a, nil
-}
-
-// Shell is the NOUN VERB command line over the runtime.
-func (a *App) Shell() *ocli.Shell {
-	sh := ocli.New(a.r, "o-df", a.Stdin, a.Stdout, a.Stderr)
-	sh.Usage = ocli.DefaultUsage("o-df")
-	sh.Version = Version
-	return sh
-}
-
-func (a *App) registerVerbs() {
-	r := a.r
-	r.Define("culprit").
-		Verb("list", a.culpritList, "every culprit with its size, biggest first: rows {noun, id: culprit/NAME, label, data: report, cells}; --all includes the absent ones").Rows("culprit").Fetch().Quiet().
-		Verb("names", a.culpritNames, "the culprit names a word may mean, for completion: every name for no query, else the one it resolves to (exact, alias or unique prefix) or the ones an ambiguous prefix shares: [{id: NAME, label: title}]").Fetch().Quiet().
-		Verb("show", a.culpritShow, "one culprit's row (paths, rebuildable, clear commands, advice) and every path it expands to, sized").Fetch().Quiet().Positional("name").
-		Verb("scan", a.culpritScan, "the culprits by size and the disk's totals: {disk, total, culprits}; --all includes the absent ones; --format table prints the table (the default at a terminal); the top-level word scan, and o-df with no command").Fetch().Quiet().
-		Verb("top", a.culpritTop, "the biggest directories and files under PATH (default .): one parallel walk, this volume only: {root, total, entries, seconds, partial}; --format table prints the table (the default at a terminal)").Fetch().Quiet().Positional("path").
-		Verb("clear", a.culpritClear, "empty rebuildable culprits (their clear commands, else their paths' contents): NAME gives {name, before, after, freed}; --names or --all (every present rebuildable culprit, never one that is not rebuildable) ask once, listing each with its size and the total, and give {cleared, skipped, freed}").Confirm("Clear {{label}}? Its tool rebuilds it on demand.").Positional("name", "more").Alias("free").
-		Verb("clear-all", a.culpritClearAll, "empty every present rebuildable culprit after one confirm listing each with its size and the total (clear --all; takes no name, so a key, the help or the palette never mixes it with the focused row): {cleared, skipped, freed}").Confirm("Clear every rebuildable culprit? Their tools rebuild them on demand.").
-		Verb("trim", a.culpritTrim, "remove the files a row's retention rule (keep, days, group, min_keep) says to remove, never the whole culprit; --dry-run lists them without asking; applying asks first, listing each file: {name, dry_run, remove, kept, bytes, freed}").Positional("name").
-		Verb("relocate", a.culpritRelocate, "copy a culprit's paths to TO/<path under home>, verify, delete the source; --link leaves a symlink: {name, dir, moved, freed}").Confirm("Relocate {{label}} (copy, verify, delete)?").Positional("name")
-	setHistory(r, ochazuke.HistoryChange, "culprit.clear", "culprit.clear-all", "culprit.trim", "culprit.relocate")
-	// A name may be abbreviated (a unique prefix or an alias), so it is
-	// Free: the verb resolves it and refuses an ambiguous or unknown one;
-	// culprit.names lists what the typed word may mean.
-	name := ochazuke.Parameter{Type: "string", Description: "a culprit name, an alias or a unique prefix of one (o-df culprit list; default: the focused row's, which a key, the help and the palette fill)", Source: "culprit.names", Free: true, From: "row:name"}
-	set := func(key, result string, params map[string]ochazuke.Parameter) {
-		op := r.Operations.At(ochazuke.Key(r.CanonicalKey(key)))
-		op.Parameters, op.Result = params, result
-		r.Operations.Set(op)
-	}
-	set("culprit.list", "row[]", map[string]ochazuke.Parameter{
-		"all":      {Type: "boolean", Description: "include culprits none of whose paths exist"},
-		"external": {Type: "boolean", Description: "also size paths that resolve onto another volume"},
-	})
-	set("culprit.names", "[{id, label}]", map[string]ochazuke.Parameter{
-		ochazuke.ChoicesQueryParameter: {Type: "string", Description: "the word typed so far"},
-	})
-	set("culprit.scan", "{disk, total, culprits}", map[string]ochazuke.Parameter{
-		"all":      {Type: "boolean", Description: "include culprits none of whose paths exist"},
-		"external": {Type: "boolean", Description: "also size paths that resolve onto another volume"},
-		"timeout":  {Type: "string", Description: "give up on a path whose walk takes longer (default 1m)"},
-		"format":   {Type: "string", Enum: []string{"json", "table"}, Description: "json (the value) or table; default table at a terminal"},
-	})
-	set("culprit.top", "{root, total, entries, seconds, partial}", map[string]ochazuke.Parameter{
-		"path":     {Type: "string", Description: "the directory to walk (default .)", Free: true},
-		"depth":    {Type: ochazuke.SettingInteger, Description: "report directories down to this many levels below PATH (default 2)"},
-		"n":        {Type: ochazuke.SettingInteger, Description: "keep this many entries (0: all; default 30)"},
-		"min":      {Type: "string", Description: "report files at least this big and drop smaller directories (default 100M)"},
-		"timeout":  {Type: "string", Description: "stop walking after this long and answer what was found, marked partial (default 5m)"},
-		"external": {Type: "boolean", Description: "allow a PATH on another volume"},
-		"format":   {Type: "string", Enum: []string{"json", "table"}, Description: "json (the value) or table; default table at a terminal"},
-	})
-	set("culprit.show", "report", map[string]ochazuke.Parameter{"name": name})
-	set("culprit.clear", "{name, before, after, freed} | {cleared, skipped, freed}", map[string]ochazuke.Parameter{
-		"name":  name,
-		"names": {Type: "array", Description: "several culprit names (each may be a unique prefix or an alias), cleared after one confirm (o-df free NAME NAME... fills it)"},
-		"more":  {Type: "string", Rest: true, Description: "further culprit names after the first (o-df free NAME NAME...)"},
-		"all":   {Type: "boolean", Description: "every present rebuildable culprit, after one confirm listing them; culprits that are not rebuildable (downloads, movies) are never included"},
-	})
-	set("culprit.clear-all", "{cleared, skipped, freed}", nil)
-	set("culprit.trim", "{name, dry_run, remove, kept, bytes, freed}", map[string]ochazuke.Parameter{
-		"name":    name,
-		"dry-run": {Type: "boolean", Description: "list what the row's rule would remove and its bytes; nothing is removed and nothing is asked"},
-	})
-	set("culprit.relocate", "{name, dir, moved, freed}", map[string]ochazuke.Parameter{
-		"name":        name,
-		"to":          {Type: "string", Description: "the destination root (default: relocate_to in the culprits file; with neither, relocate fails)"},
-		"link":        {Type: "boolean", Description: "leave a symlink at each old path"},
-		"same-volume": {Type: "boolean", Description: "allow a destination on the source's volume (frees nothing)"},
-	})
-	// Checks run before the verbs' confirms, from every path: clearing
-	// several culprits asks one question naming each with its size;
-	// relocating without a destination fails before asking anything.
-	must(r.AddVerbCheck("culprit.clear", ochazuke.VerbCheck{Name: "clear-many", Check: a.checkClear}))
-	a.defineCoreDelete()
-	setHistory(r, ochazuke.HistoryChange, "culprit.delete")
-	must(r.AddVerbCheck("culprit.delete", ochazuke.VerbCheck{Name: "clear-many", Check: a.checkClear}))
-	must(r.AddVerbCheck("culprit.clear-all", ochazuke.VerbCheck{Name: "clear-many", Check: func(r *ochazuke.Runtime, cx ochazuke.Context, args ochazuke.Arguments) ochazuke.Verdict {
-		return a.checkClear(r, cx, allArgs(args))
-	}}))
-	must(r.AddVerbCheck("culprit.trim", ochazuke.VerbCheck{Name: "trim-ask", Check: a.checkTrim}))
-	must(r.AddVerbCheck("culprit.relocate", ochazuke.VerbCheck{Name: "destination", Check: a.checkRelocate}))
-}
-
-func must(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
-
-// bind installs the key rows: d d clears the marked rows (the focused one
-// when none is marked), D clears every present rebuildable culprit (one
-// confirm), m relocates the marked rows to relocate_to, R reloads, q
-// quits. Space marks (the list noun's row); j/k move.
-func (a *App) bind() error {
-	r := a.r
-	r.Define("df-page").Mode("normal").
-		Bind("R", ochazuke.Do("culprit.list")).
-		Bind("D", ochazuke.Do("culprit.clear-all").Hinted("clear all")).
-		Bind("q", ochazuke.Do("app.quit"))
-	r.Define("culprit").Mode("normal").
-		Bind("d d", ochazuke.Do("collection.apply", ochazuke.Arguments{"verb": "clear"}).Hinted("clear")).
-		Bind("m", ochazuke.Do("collection.apply", ochazuke.Arguments{"verb": "relocate"}).Hinted("relocate"))
-	return loadDefaultBindings(r)
-}
-
-// culprit is the one a verb acts on: --name, else the targeted row's.
-func (a *App) culprit(c ochazuke.Ctx) (Culprit, error) {
-	if n := ochazuke.StringArg(c.Args, "name", ""); n != "" {
-		return a.Cfg.Resolve(n)
-	}
-	if c.Instance != nil {
-		if rep, ok := c.Instance.Data.(Report); ok {
-			return rep.Culprit, nil
-		}
-	}
-	return Culprit{}, errors.New("a culprit is required: o-df culprit VERB NAME (o-df culprit list names them)")
-}
-
-func (a *App) culpritList(c ochazuke.Ctx) ochazuke.Result {
-	all, _ := c.Args["all"].(bool)
-	if ext, _ := c.Args["external"].(bool); ext {
-		a.Env.External = true
-	}
-	a.loading = "sizing culprits"
-	var disk Disk // read with the rows, used by Then (after the work)
-	return ochazuke.Pending(func(ctx context.Context) (any, error) {
-		reps := ProbeAll(ctx, a.Env, a.Cfg.Culprits)
-		if !all {
-			reps = presentOnly(reps)
-		}
-		disk, _ = DiskOf(a.Env.Home)
-		return a.rows(reps), ctx.Err()
-	}).Replacing("list").Then(func(_ ochazuke.Ctx, v any, err error) {
-		a.loading, a.listErr = "", err
-		if err != nil {
-			return
-		}
-		rows := v.([]ocli.Row)
-		a.disk, a.reports = disk, make([]Report, len(rows))
-		items := make([]ochazuke.ListItem, len(rows))
-		for i, r := range rows {
-			a.reports[i] = r.Data.(Report)
-			items[i] = ochazuke.ListItem{ID: r.ID, Label: r.Label, Noun: r.Noun, Data: r.Data, Cells: r.Cells}
-		}
-		_ = a.list.SetItems(items)
-	})
+	return &App{Env: env, Cfg: cfg, Now: time.Now, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}, nil
 }
 
 func presentOnly(reps []Report) []Report {
@@ -266,25 +50,7 @@ func presentOnly(reps []Report) []Report {
 	return out
 }
 
-// culpritNames are the choices for a culprit name (Config.Candidates).
-func (a *App) culpritNames(c ochazuke.Ctx) ochazuke.Result {
-	cs := a.Cfg.Candidates(ochazuke.StringArg(c.Args, ochazuke.ChoicesQueryParameter, ""))
-	out := make([]ochazuke.Choice, len(cs))
-	for i, cu := range cs {
-		out[i] = ochazuke.Choice{ID: cu.Name, Label: cu.Title}
-	}
-	return ochazuke.Done(out)
-}
-
-func (a *App) culpritShow(c ochazuke.Ctx) ochazuke.Result {
-	cu, err := a.culprit(c)
-	if err != nil {
-		return ochazuke.Failed(err)
-	}
-	return ochazuke.Pending(func(ctx context.Context) (any, error) { return Probe(ctx, a.Env, cu), nil })
-}
-
-// SizeResult is the culprit size prop's answer.
+// SizeResult is a culprit's size answer.
 type SizeResult struct {
 	Name     string    `json:"name"`
 	Bytes    int64     `json:"bytes"`
@@ -293,159 +59,32 @@ type SizeResult struct {
 	LastUsed time.Time `json:"last_used,omitzero"`
 }
 
-// sizeProp is the culprit's computed size prop: the probe's {name, bytes,
-// human, files, last_used}, read when asked for (get --prop size, o df
-// culprit size NAME), never in the rows.
-func (a *App) sizeProp() ochazuke.PropSpec {
-	return ochazuke.PropSpec{Name: "size", ReadOnly: true,
-		Parameter: ochazuke.Parameter{Type: ochazuke.PropObject, Description: "The culprit's size: {name, bytes, human, files, last_used}"},
-		Read: func(_ ochazuke.Ctx, th ochazuke.Thing) (any, error) {
-			name, _ := th["name"].(string)
-			cu, err := a.Cfg.Resolve(name)
-			if err != nil {
-				return nil, err
-			}
-			r := Probe(context.Background(), a.Env, cu)
-			return SizeResult{Name: r.Name, Bytes: r.Bytes, Human: Human(r.Bytes), Files: r.Files, LastUsed: r.LastUsed}, nil
-		}}
+func sizeOf(r Report) SizeResult {
+	return SizeResult{Name: r.Name, Bytes: r.Bytes, Human: Human(r.Bytes), Files: r.Files, LastUsed: r.LastUsed}
 }
 
-func (a *App) culpritClear(c ochazuke.Ctx) ochazuke.Result {
-	names, all := clearArgs(c.Args)
-	if all || len(names) > 1 {
-		if all && len(names) > 0 {
-			return ochazuke.Failed(errors.New("clear takes culprit names or --all, not both"))
-		}
-		known := a.known()
-		return ochazuke.Pending(func(ctx context.Context) (any, error) {
-			plan, err := a.planClear(ctx, names, all, known)
-			if err != nil {
-				return nil, err
-			}
-			return a.clearMany(ctx, plan), nil
-		}).Then(a.changed(func(v any) string {
-			res := v.(ClearManyResult)
-			msg := fmt.Sprintf("cleared %s, freed %s", culprits(len(res.Cleared)), Human(res.Freed))
-			if n := skippedPaths(res); n > 0 {
-				msg += fmt.Sprintf("; skipped %d paths (not yours / permission denied)", n)
-			}
-			return msg
-		}))
-	}
-	cu, err := a.culprit(c)
-	if len(names) == 1 {
-		cu, err = a.Cfg.Resolve(names[0])
-	}
-	if err != nil {
-		return ochazuke.Failed(err)
-	}
-	if !cu.Rebuildable {
-		return ochazuke.Failed(fmt.Errorf("%s is not rebuildable; o-df clears only rebuildable culprits (relocate moves it instead)", cu.Name))
-	}
-	return ochazuke.Pending(func(ctx context.Context) (any, error) {
-		return Clear(ctx, a.Env, cu)
-	}).Then(a.changed(func(v any) string {
-		res := v.(ClearResult)
-		msg := "cleared " + res.Name + ", freed " + Human(res.Freed)
-		if len(res.Skipped) > 0 {
-			msg += fmt.Sprintf("; skipped %d paths (not yours / permission denied)", len(res.Skipped))
-		}
-		return msg
-	}))
+func notRebuildable(cu Culprit) error {
+	return fmt.Errorf("%s is not rebuildable; o-df clears only rebuildable culprits (relocate moves it instead)", cu.Name)
 }
 
-// culpritClearAll is clear --all under its own name.
-func (a *App) culpritClearAll(c ochazuke.Ctx) ochazuke.Result {
-	c.Args = allArgs(c.Args)
-	return a.culpritClear(c)
+// --- confirm wording -------------------------------------------------------------
+
+const (
+	clearConfirm    = "Clear {{label}}? Its tool rebuilds it on demand."
+	relocateConfirm = "Relocate {{label}} (copy, verify, delete)?"
+)
+
+// namedPrompt fills a confirm with the culprit's full name and, when the
+// word was an abbreviation (a prefix, an alias), says which word it was.
+func namedPrompt(tmpl, word string, cu Culprit) string {
+	p := strings.ReplaceAll(tmpl, "{{label}}", cu.Name)
+	if word != "" && word != cu.Name {
+		p += fmt.Sprintf(" (%q is %s)", word, cu.Name)
+	}
+	return p
 }
 
-// culpritTrim removes what the row's rule says (or lists it with --dry-run).
-func (a *App) culpritTrim(c ochazuke.Ctx) ochazuke.Result {
-	cu, err := a.culprit(c)
-	if err != nil {
-		return ochazuke.Failed(err)
-	}
-	if dry, _ := c.Args["dry-run"].(bool); dry {
-		return ochazuke.Pending(func(ctx context.Context) (any, error) {
-			return PlanTrim(ctx, a.Env, cu)
-		})
-	}
-	return ochazuke.Pending(func(ctx context.Context) (any, error) {
-		return Trim(ctx, a.Env, cu)
-	}).Then(a.changed(func(v any) string {
-		res := v.(TrimResult)
-		return fmt.Sprintf("trimmed %s: removed %d files, freed %s", res.Name, len(res.Remove), Human(res.Freed))
-	}))
-}
-
-// checkTrim asks before an applying trim lists what goes; a dry run, or a
-// rule that removes nothing, asks nothing.
-func (a *App) checkTrim(_ *ochazuke.Runtime, _ ochazuke.Context, args ochazuke.Arguments) ochazuke.Verdict {
-	if dry, _ := args["dry-run"].(bool); dry {
-		return ochazuke.Allow()
-	}
-	n := ochazuke.StringArg(args, "name", "")
-	if n == "" {
-		return ochazuke.AskFirst("Trim the focused culprit by its retention rule?")
-	}
-	cu, err := a.Cfg.Resolve(n)
-	if err != nil {
-		return ochazuke.Refuse(err.Error())
-	}
-	plan, err := PlanTrim(context.Background(), a.Env, cu)
-	switch {
-	case err != nil:
-		return ochazuke.Refuse(err.Error())
-	case len(plan.Remove) == 0:
-		return ochazuke.Allow()
-	}
-	return ochazuke.AskFirst(plan.Prompt())
-}
-
-// allArgs is args as clear --all: the all flag only.
-func allArgs(_ ochazuke.Arguments) ochazuke.Arguments {
-	return ochazuke.Arguments{"all": true}
-}
-
-// clearArgs are clear's names (name, then names, once each) and --all.
-func clearArgs(args ochazuke.Arguments) (names []string, all bool) {
-	all, _ = args["all"].(bool)
-	add := func(n string) {
-		if n = strings.TrimSpace(n); n != "" && !slices.Contains(names, n) {
-			names = append(names, n)
-		}
-	}
-	add(ochazuke.StringArg(args, "name", ""))
-	for _, n := range strings.Fields(ochazuke.StringArg(args, "more", "")) {
-		add(n)
-	}
-	switch v := args["names"].(type) {
-	case []string:
-		for _, n := range v {
-			add(n)
-		}
-	case []any:
-		for _, n := range v {
-			add(fmt.Sprint(n))
-		}
-	case string:
-		for _, n := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' }) {
-			add(n)
-		}
-	}
-	return names, all
-}
-
-// known is what the TUI last sized (the list's rows), so asking about
-// several culprits does not walk them again; nil on the command line,
-// where the plan sizes them.
-func (a *App) known() []Report {
-	if !a.tui || a.reports == nil {
-		return nil
-	}
-	return slices.Clone(a.reports)
-}
+// --- clear -----------------------------------------------------------------------
 
 // ClearPlan is what clearing several culprits will do: the culprits to
 // clear with their sizes, and the present ones --all leaves out because
@@ -461,7 +100,7 @@ type ClearPlan struct {
 // Every name must resolve to one rebuildable culprit (an ambiguous or
 // unknown name fails the whole plan); all takes every present
 // rebuildable one and never one that is not rebuildable. known, when
-// set, are reports already read (the TUI's rows): a culprit missing
+// set, are reports already read (the page's rows): a culprit missing
 // from them is absent.
 func (a *App) planClear(ctx context.Context, names []string, all bool, known []Report) (ClearPlan, error) {
 	var cs []Culprit
@@ -474,7 +113,7 @@ func (a *App) planClear(ctx context.Context, names []string, all bool, known []R
 		}
 		for _, cu := range resolved {
 			if !cu.Rebuildable {
-				return ClearPlan{}, fmt.Errorf("%s is not rebuildable; o-df clears only rebuildable culprits (relocate moves it instead)", cu.Name)
+				return ClearPlan{}, notRebuildable(cu)
 			}
 			cs = append(cs, cu)
 		}
@@ -482,8 +121,7 @@ func (a *App) planClear(ctx context.Context, names []string, all bool, known []R
 	var reps []Report
 	if known != nil {
 		for _, cu := range cs {
-			i := slices.IndexFunc(known, func(r Report) bool { return r.Name == cu.Name })
-			if i >= 0 {
+			if i := slices.IndexFunc(known, func(r Report) bool { return r.Name == cu.Name }); i >= 0 {
 				reps = append(reps, known[i])
 			} else {
 				reps = append(reps, Report{Culprit: cu})
@@ -584,70 +222,19 @@ func (a *App) clearMany(ctx context.Context, plan ClearPlan) ClearManyResult {
 	return res
 }
 
-// checkClear asks once before clearing several culprits (--names, --all):
-// the prompt names each with its size and the total. One culprit keeps
-// the verb's own confirm, asked about its full name when the word was an
-// abbreviation (checkName).
-func (a *App) checkClear(r *ochazuke.Runtime, _ ochazuke.Context, args ochazuke.Arguments) ochazuke.Verdict {
-	names, all := clearArgs(args)
-	if all && len(names) > 0 {
-		return ochazuke.Refuse("clear takes culprit names or --all, not both")
+func clearManyNote(res ClearManyResult) string {
+	msg := fmt.Sprintf("cleared %s, freed %s", culprits(len(res.Cleared)), Human(res.Freed))
+	if n := skippedPaths(res); n > 0 {
+		msg += fmt.Sprintf("; skipped %d paths (not yours / permission denied)", n)
 	}
-	if !all && len(names) < 2 {
-		if len(names) == 0 {
-			return ochazuke.Allow()
-		}
-		cu, err := a.Cfg.Resolve(names[0])
-		if err == nil && !cu.Rebuildable {
-			err = fmt.Errorf("%s is not rebuildable; o-df clears only rebuildable culprits (relocate moves it instead)", cu.Name)
-		}
-		return a.checkName(r, "culprit.clear", names[0], cu, err)
-	}
-	plan, err := a.planClear(context.Background(), names, all, a.known())
-	switch {
-	case err != nil:
-		return ochazuke.Refuse(err.Error())
-	case len(plan.Clear) == 0:
-		return ochazuke.Refuse("nothing to clear: no rebuildable culprit is present")
-	}
-	return ochazuke.AskFirst(plan.Prompt())
+	return msg
 }
 
-// checkRelocate refuses a relocate with no destination (no --to, no
-// relocate_to) or an ambiguous or unknown name before its confirm.
-func (a *App) checkRelocate(r *ochazuke.Runtime, _ ochazuke.Context, args ochazuke.Arguments) ochazuke.Verdict {
-	if a.relocateTo(args) == "" {
-		return ochazuke.Refuse(a.noDestination().Error())
-	}
-	if n := ochazuke.StringArg(args, "name", ""); n != "" {
-		cu, err := a.Cfg.Resolve(n)
-		return a.checkName(r, "culprit.relocate", n, cu, err)
-	}
-	return ochazuke.Allow()
-}
+// --- relocate ----------------------------------------------------------------------
 
-// checkName is a destructive verb's check of the one name it was given:
-// refuse what did not resolve; a word that resolved to another name (a
-// prefix, an alias) asks the verb's own confirm about the full name, so
-// the question says what will be acted on; an exact name keeps the
-// verb's confirm as it is.
-func (a *App) checkName(r *ochazuke.Runtime, key, word string, cu Culprit, err error) ochazuke.Verdict {
-	switch {
-	case err != nil:
-		return ochazuke.Refuse(err.Error())
-	case cu.Name == word:
-		return ochazuke.Allow()
-	}
-	op, _ := r.Operation(key)
-	if op.Confirm == "" {
-		return ochazuke.Allow()
-	}
-	return ochazuke.AskFirst(strings.ReplaceAll(op.Confirm, "{{label}}", cu.Name) + fmt.Sprintf(" (%q is %s)", word, cu.Name))
-}
-
-// relocateTo is --to, else the culprits file's relocate_to, else "".
-func (a *App) relocateTo(args ochazuke.Arguments) string {
-	if to := ochazuke.StringArg(args, "to", ""); to != "" {
+// relocateTo is to, else the culprits file's relocate_to, else "".
+func (a *App) relocateTo(to string) string {
+	if to != "" {
 		return to
 	}
 	return a.Cfg.RelocateTo
@@ -657,55 +244,14 @@ func (a *App) noDestination() error {
 	return fmt.Errorf("relocate needs a destination and none is set: pass --to DIR, or set \"relocate_to\" in %s", a.Env.UserFile)
 }
 
-func (a *App) culpritRelocate(c ochazuke.Ctx) ochazuke.Result {
-	cu, err := a.culprit(c)
-	if err != nil {
-		return ochazuke.Failed(err)
-	}
-	o := RelocateOptions{To: a.relocateTo(c.Args)}
-	if o.To == "" {
-		return ochazuke.Failed(a.noDestination())
-	}
-	o.Link, _ = c.Args["link"].(bool)
-	o.SameVolume, _ = c.Args["same-volume"].(bool)
-	return ochazuke.Pending(func(ctx context.Context) (any, error) {
-		return Relocate(ctx, a.Env, cu, o)
-	}).Then(a.changed(func(v any) string {
-		res := v.(RelocateResult)
-		return "relocated " + res.Name + " to " + a.Env.Tilde(res.Dir) + ", freed " + Human(res.Freed)
-	}))
-}
+// --- rows -------------------------------------------------------------------------
 
-// changed reports a change on the TUI and reads the sizes again.
-func (a *App) changed(say func(any) string) func(ochazuke.Ctx, any, error) {
-	return func(ctx ochazuke.Ctx, v any, err error) {
-		if !a.tui {
-			return
-		}
-		if err != nil {
-			a.note = "error: " + err.Error()
-		} else {
-			a.note = say(v)
-			ctx.Info(a.note)
-		}
-		a.refresh()
-	}
-}
-
-func (a *App) refresh() {
-	_, err := a.r.Launch(culpritsID, "culprit.list", a.culpritList(ochazuke.Ctx{Args: ochazuke.Arguments{}}), ochazuke.Ctx{Runtime: a.r, Context: a.r.Context(), Args: ochazuke.Arguments{}, Instance: a.r.Instances[culpritsID]})
-	if err != nil {
-		a.r.UI().Status(err.Error())
-	}
-}
-
-// Rows: id culprit/NAME, label NAME, one cell per column.
-
+// cells are a report's table cells: culprit, size, rebuild, used, advice, path.
 func (a *App) cells(r Report) []string {
-	rb := "no"
-	if r.Rebuildable {
-		rb = "yes"
-	}
+	return []string{r.Name, sizeText(r), yesNo(r.Rebuildable), Ago(a.Now(), r.LastUsed), r.Recommend, a.pathText(r)}
+}
+
+func sizeText(r Report) string {
 	size := Human(r.Bytes)
 	if r.Errors > 0 {
 		size = "≥" + size
@@ -715,7 +261,14 @@ func (a *App) cells(r Report) []string {
 			size = "timeout"
 		}
 	}
-	return []string{r.Name, size, rb, Ago(a.Now(), r.LastUsed), r.Recommend, a.pathText(r)}
+	return size
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
 }
 
 func (a *App) pathText(r Report) string {
@@ -736,30 +289,71 @@ func (a *App) pathText(r Report) string {
 	return strings.Join(parts, ", ")
 }
 
-func (a *App) items(reps []Report) []ochazuke.ListItem {
-	out := make([]ochazuke.ListItem, len(reps))
-	for i, r := range reps {
-		out[i] = ochazuke.ListItem{ID: "culprit/" + r.Name, Label: r.Name, Noun: "culprit", Data: r, Cells: a.cells(r)}
-	}
-	return out
-}
-
-func (a *App) rows(reps []Report) []ocli.Row {
-	out := make([]ocli.Row, len(reps))
-	for i, it := range a.items(reps) {
-		out[i] = ocli.Row{Noun: it.Noun, ID: it.ID, Label: it.Label, Data: it.Data, Cells: it.Cells}
-	}
-	return out
-}
-
-// setHistory declares the history kind of each named verb (from o-git).
-func setHistory(r *ochazuke.Runtime, kind string, keys ...string) {
-	for _, key := range keys {
-		op, ok := r.Operations.Find(ochazuke.Key(r.CanonicalKey(key)))
-		if !ok {
-			panic("setHistory: no operation " + key)
+// describe is a culprit's detail: its row and every path it expands to.
+func describe(env Env, r Report, now time.Time) string {
+	var b strings.Builder
+	line := func(k, v string) {
+		if v != "" {
+			fmt.Fprintf(&b, "%-11s %s\n", k, v)
 		}
-		op.HistoryKind = kind
-		r.Operations.Set(op)
 	}
+	line("culprit", r.Name)
+	line("what", r.Title)
+	line("category", r.Category)
+	line("size", fmt.Sprintf("%s in %d files", Human(r.Bytes), r.Files))
+	if r.Errors > 0 {
+		line("unreadable", fmt.Sprintf("%d entries (the size is a lower bound)", r.Errors))
+	}
+	line("size error", r.SizeErr)
+	if !r.LastUsed.IsZero() {
+		line("last used", r.LastUsed.Format("2006-01-02 15:04")+" ("+Ago(now, r.LastUsed)+" ago)")
+	}
+	rb := "no: clean refuses; relocate moves it"
+	if r.Rebuildable {
+		rb = "yes"
+	}
+	line("rebuildable", rb)
+	line("rebuild", r.Rebuild)
+	line("advice", r.Recommend)
+	if r.Trimmable() {
+		rule := []string{}
+		if r.Keep > 0 {
+			rule = append(rule, fmt.Sprintf("keep %d", r.Keep))
+		}
+		if r.Days > 0 {
+			rule = append(rule, fmt.Sprintf("days %d", r.Days))
+		}
+		if r.Group != "" {
+			rule = append(rule, "group "+r.Group)
+		}
+		if r.MinKeep > 0 {
+			rule = append(rule, fmt.Sprintf("min_keep %d", r.MinKeep))
+		}
+		line("trim rule", strings.Join(rule, ", "))
+	}
+	line("notes", r.Notes)
+	for _, cmd := range r.Clear {
+		line("clear runs", strings.Join(cmd, " "))
+	}
+	line("source", env.Tilde(r.Source))
+	b.WriteString("\npaths\n")
+	for _, f := range r.Found {
+		switch f.State {
+		case "present":
+			size := Human(f.Usage.Bytes)
+			if f.Timeout {
+				size = "timeout"
+			}
+			fmt.Fprintf(&b, "  %7s  %s\n", size, env.Tilde(f.Path))
+		case "symlink":
+			fmt.Fprintf(&b, "  %7s  %s → %s\n", "link", env.Tilde(f.Path), f.Target)
+		case "external":
+			fmt.Fprintf(&b, "  %7s  %s → %s (another volume; external: true reads it)\n", "skipped", env.Tilde(f.Path), f.Target)
+		case "absent", "":
+			fmt.Fprintf(&b, "  %7s  %s\n", "absent", env.Tilde(f.Path))
+		default:
+			fmt.Fprintf(&b, "  %7s  %s\n", f.State, env.Tilde(f.Path))
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

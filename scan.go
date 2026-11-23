@@ -7,14 +7,11 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
-
-	"ofam.dev/ochazuke"
 )
 
-// scan and top are verbs of the culprit noun (culprit.scan, culprit.top):
-// what the top-level words scan and top read. The answer is the value
-// (JSON); format table gives the table, and is the default when a person
-// is at the terminal (Env.TTY). Neither changes anything.
+// scan and top read and change nothing. The answer is the value (JSON);
+// --format table gives the table, and is the default when a person is at
+// the terminal (Env.TTY).
 
 // ScanResult is culprit.scan's value.
 type ScanResult struct {
@@ -34,47 +31,19 @@ type TopResult struct {
 	Partial bool `json:"partial,omitempty"`
 }
 
-// asTable says the request wants the table: format table, or no format at
-// a terminal.
-func (a *App) asTable(c ochazuke.Ctx) bool {
-	switch f := ochazuke.StringArg(c.Args, "format", ""); f {
-	case "":
-		return a.Env.TTY
-	default:
-		return f == "table"
+// scan sizes every culprit (only the present ones unless all) and reads
+// the disk's totals.
+func (a *App) scan(ctx context.Context, all bool) ScanResult {
+	reps := ProbeAll(ctx, a.Env, a.Cfg.Culprits)
+	if !all {
+		reps = presentOnly(reps)
 	}
-}
-
-func (a *App) culpritScan(c ochazuke.Ctx) ochazuke.Result {
-	all, _ := c.Args["all"].(bool)
-	env := a.Env
-	if ext, _ := c.Args["external"].(bool); ext {
-		env.External = true
+	disk, _ := DiskOf(a.Env.Home)
+	res := ScanResult{Disk: disk, Culprits: reps}
+	for _, r := range reps {
+		res.Total += r.Bytes
 	}
-	if d := ochazuke.StringArg(c.Args, "timeout", ""); d != "" {
-		t, err := time.ParseDuration(d)
-		if err != nil {
-			return ochazuke.Failed(fmt.Errorf("timeout: %w", err))
-		}
-		ProbeTimeout = t
-	}
-	table := a.asTable(c)
-	return ochazuke.Pending(func(ctx context.Context) (any, error) {
-		reps := ProbeAll(ctx, env, a.Cfg.Culprits)
-		if !all {
-			reps = presentOnly(reps)
-		}
-		disk, _ := DiskOf(env.Home)
-		res := ScanResult{Disk: disk, Culprits: reps}
-		for _, r := range reps {
-			res.Total += r.Bytes
-		}
-		if table {
-			text := a.scanText(res)
-			a.text = &text
-		}
-		return res, nil
-	})
+	return res
 }
 
 func (a *App) scanText(res ScanResult) string {
@@ -94,68 +63,57 @@ func diskLine(d Disk) string {
 	return fmt.Sprintf("%s  size %s  used %s  free %s  %d%%", d.Path, Human(d.Size), Human(d.Used), Human(d.Free), d.Usage)
 }
 
-func (a *App) culpritTop(c ochazuke.Ctx) ochazuke.Result {
-	root := ochazuke.StringArg(c.Args, "path", ".")
-	depth := 2
-	if v, ok := c.Args["depth"]; ok {
-		depth = intArg(v, depth)
+// TopOptions are top's flags.
+type TopOptions struct {
+	Path     string
+	Depth, N int
+	Min      string
+	Timeout  time.Duration
+	External bool
+}
+
+// top walks PATH once and lists the biggest directories and files.
+func (a *App) top(ctx context.Context, o TopOptions) (TopResult, error) {
+	if o.Path == "" {
+		o.Path = "."
 	}
-	n := 30
-	if v, ok := c.Args["n"]; ok {
-		n = intArg(v, n)
+	if o.Min == "" {
+		o.Min = "100M"
 	}
-	minText := ochazuke.StringArg(c.Args, "min", "100M")
-	timeout := 5 * time.Minute
-	if d := ochazuke.StringArg(c.Args, "timeout", ""); d != "" {
-		t, err := time.ParseDuration(d)
-		if err != nil {
-			return ochazuke.Failed(fmt.Errorf("timeout: %w", err))
-		}
-		timeout = t
+	if o.Timeout <= 0 {
+		o.Timeout = 5 * time.Minute
 	}
-	external := a.Env.External
-	if ext, _ := c.Args["external"].(bool); ext {
-		external = true
-	}
-	matches, literal := a.Env.Expand(root)
+	matches, literal := a.Env.Expand(o.Path)
 	if len(matches) > 0 {
 		literal = matches[0]
 	}
 	if resolved, err := filepath.EvalSymlinks(literal); err == nil {
 		literal = resolved
 	}
-	if _, elsewhere := a.Env.Elsewhere(literal); elsewhere && !external {
-		return ochazuke.Failed(fmt.Errorf("%s is on another volume than the home directory; --external (or \"external\": true in the culprits file) reads it", literal))
+	if _, elsewhere := a.Env.Elsewhere(literal); elsewhere && !(o.External || a.Env.External) {
+		return TopResult{}, fmt.Errorf("%s is on another volume than the home directory; --external (or \"external\": true in the culprits file) reads it", literal)
 	}
-	min, err := ParseSize(minText)
+	min, err := ParseSize(o.Min)
 	if err != nil {
-		return ochazuke.Failed(err)
+		return TopResult{}, err
 	}
-	table := a.asTable(c)
-	return ochazuke.Pending(func(ctx context.Context) (any, error) {
-		start := time.Now()
-		ctx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		entries, total, partial, err := Top(ctx, literal, depth, min)
-		if err != nil {
-			return nil, err
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
+	defer cancel()
+	entries, total, partial, err := Top(ctx, literal, o.Depth, min)
+	if err != nil {
+		return TopResult{}, err
+	}
+	kept := entries[:0]
+	for _, e := range entries {
+		if e.Usage.Bytes >= min {
+			kept = append(kept, e)
 		}
-		kept := entries[:0]
-		for _, e := range entries {
-			if e.Usage.Bytes >= min {
-				kept = append(kept, e)
-			}
-		}
-		if n > 0 && len(kept) > n {
-			kept = kept[:n]
-		}
-		res := TopResult{Root: literal, Total: total, Entries: kept, Seconds: time.Since(start).Seconds(), Partial: partial}
-		if table {
-			text := a.topText(res, timeout)
-			a.text = &text
-		}
-		return res, nil
-	})
+	}
+	if o.N > 0 && len(kept) > o.N {
+		kept = kept[:o.N]
+	}
+	return TopResult{Root: literal, Total: total, Entries: kept, Seconds: time.Since(start).Seconds(), Partial: partial}, nil
 }
 
 func (a *App) topText(res TopResult, timeout time.Duration) string {
@@ -175,21 +133,4 @@ func (a *App) topText(res TopResult, timeout time.Duration) string {
 	}
 	tw.Flush()
 	return strings.TrimRight(b.String(), "\n")
-}
-
-func intArg(v any, def int) int {
-	switch x := v.(type) {
-	case int:
-		return x
-	case int64:
-		return int(x)
-	case float64:
-		return int(x)
-	case string:
-		var n int
-		if _, err := fmt.Sscan(x, &n); err == nil {
-			return n
-		}
-	}
-	return def
 }

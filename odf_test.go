@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"ofam.dev/ochazuke"
-	ocli "ofam.dev/ochazuke/cli"
+	"ofam.dev/ochazuke/config"
+	"ofam.dev/ochazuke/core"
 )
 
 // Every test runs against a temp HOME with a fixture of caches; nothing
@@ -466,19 +466,28 @@ func TestMarkedRowsClearTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.r.Execute(ochazuke.Request{Noun: "culprit", Verb: "list", Target: pageID}); err != nil {
-		t.Fatal(err)
-	}
-	settle(t, a)
-	for _, id := range []string{"culprit/npm-cache", "culprit/turbo-cache"} {
-		if err := a.list.ToggleMark(id); err != nil {
-			t.Fatal(err)
+	sh, initCmd := newShell(newUI(a, UIConfig{}))
+	d := newDriver(sh, initCmd, 120, 32)
+	// Mark npm-cache and turbo-cache by navigating to them and pressing space.
+	mark := func(name string) {
+		d.keys("g", "g")
+		for i := 0; i < len(pageOf(sh.State).Grid.Rows); i++ {
+			p := pageOf(sh.State)
+			if id, _ := p.focusedName(); id == name {
+				d.keys("space")
+				return
+			}
+			d.keys("j")
 		}
+		t.Fatalf("culprit %s not found in grid", name)
 	}
-	if _, err := a.r.Execute(ochazuke.Request{Noun: "ochazuke.collection", Verb: "apply", Args: ochazuke.Arguments{"id": culpritsID, "verb": "clear", "confirmed": true}}); err != nil {
-		t.Fatal(err)
+	mark("npm-cache")
+	mark("turbo-cache")
+	d.keys("d", "d")
+	if len(sh.State.Modals) != 1 || sh.State.Modals[0].ID != modalConfirm {
+		t.Fatalf("expected confirm modal, got %+v", sh.State.Modals)
 	}
-	settle(t, a)
+	d.keys("y")
 	for _, p := range []string{".npm/_cacache/a", "src/one/.turbo/cache"} {
 		if _, err := os.Stat(filepath.Join(env.Home, p)); err == nil {
 			t.Errorf("%s survived", p)
@@ -489,38 +498,29 @@ func TestMarkedRowsClearTogether(t *testing.T) {
 	}
 }
 
-// The culprit verbs declare the focused row's name (Parameter.From), so the
-// help's run of an unbound clear, with no key and no name, clears the
-// focused culprit and only it.
-func TestCulpritVerbsFillTheNameFromTheRow(t *testing.T) {
+// Running culprit.clean from the palette (with no marks) cleans the focused
+// culprit and only it, after confirmation.
+func TestCulpritCleanActsOnFocusedRow(t *testing.T) {
 	env := fixture(t)
 	a, err := New(env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, verb := range []string{"show", "clear", "relocate"} {
-		if got := a.r.Operations.At(ochazuke.Key("culprit." + verb)).Parameters["name"].From; got != "row:name" {
-			t.Errorf("culprit.%s name From %q", verb, got)
+	sh, initCmd := newShell(newUI(a, UIConfig{}))
+	d := newDriver(sh, initCmd, 120, 32)
+	d.keys("g", "g")
+	for i := 0; i < len(pageOf(sh.State).Grid.Rows); i++ {
+		p := pageOf(sh.State)
+		if id, _ := p.focusedName(); id == "npm-cache" {
+			break
 		}
+		d.keys("j")
 	}
-	if _, err := a.r.Execute(ochazuke.Request{Noun: "culprit", Verb: "list", Target: pageID}); err != nil {
-		t.Fatal(err)
+	d.command("culprit.clean")
+	if len(sh.State.Modals) != 1 || sh.State.Modals[0].ID != modalConfirm {
+		t.Fatalf("expected confirm modal, got %+v", sh.State.Modals)
 	}
-	settle(t, a)
-	a.tui = true
-	if err := a.list.Select("culprit/npm-cache"); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.list.Focus(); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.r.RunUnbound(a.r.BaseFocus(), ochazuke.Request{Noun: "culprit", Verb: "clear"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.r.Execute(ochazuke.Request{Noun: "ochazuke.confirm", Verb: "accept"}); err != nil {
-		t.Fatal(err)
-	}
-	settle(t, a)
+	d.keys("y")
 	if _, err := os.Stat(filepath.Join(env.Home, ".npm/_cacache/a")); err == nil {
 		t.Error("the focused culprit survived")
 	}
@@ -529,20 +529,21 @@ func TestCulpritVerbsFillTheNameFromTheRow(t *testing.T) {
 	}
 }
 
-func settle(t *testing.T, a *App) {
-	t.Helper()
-	if err := ocli.Settle(a.r, nil); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestBindingsAreValid(t *testing.T) {
 	a, err := New(fixture(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if warnings, err := a.r.ValidateBindings(); err != nil || len(warnings) > 0 {
-		t.Fatal(err, warnings)
+	u := newUI(a, UIConfig{})
+	if diags := config.CheckBindings(modes, u.Bindings, u.Specs...); len(diags) > 0 {
+		for _, d := range diags {
+			if d.Severity == config.SevError {
+				t.Errorf("binding #%d: %s", d.Index, d.Message)
+			}
+		}
+	}
+	if _, err := core.NewKeymap(modes, u.Bindings, u.Specs...); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -830,30 +831,25 @@ func TestHelpListsScanAndTop(t *testing.T) {
 	}
 }
 
-// D's request (culprit.clear-all) on the page asks once, from the
-// sizes the list already read, and y clears every rebuildable row.
+// D (culprit.clean.all) asks once, from the sizes the list already read,
+// and y clears every rebuildable row while leaving downloads untouched.
 func TestClearAllKeyRequest(t *testing.T) {
 	env := fixture(t)
 	a, err := New(env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.r.Execute(ochazuke.Request{Noun: "culprit", Verb: "list", Target: pageID}); err != nil {
-		t.Fatal(err)
+	sh, initCmd := newShell(newUI(a, UIConfig{}))
+	d := newDriver(sh, initCmd, 120, 32)
+	d.keys("D")
+	if len(sh.State.Modals) != 1 || sh.State.Modals[0].ID != modalConfirm {
+		t.Fatalf("expected confirm modal, got %+v", sh.State.Modals)
 	}
-	settle(t, a)
-	a.tui = true
-	if _, err := a.r.Execute(ochazuke.Request{Noun: "culprit", Verb: "clear-all", Target: pageID}); err != nil {
-		t.Fatal(err)
+	cd, _ := modalData(sh.State, modalConfirm).(confirmData)
+	if !strings.Contains(cd.Text, "Clear 3 culprits") || !strings.Contains(cd.Text, "downloads") {
+		t.Fatalf("no confirm naming the culprits: %+v", cd)
 	}
-	top := a.r.Instances[a.r.TopModal()]
-	if top == nil || top.Noun != "ochazuke.confirm" || !strings.Contains(top.Payload.Prompt, "Clear 3 culprits") || !strings.Contains(top.Payload.Prompt, "downloads") {
-		t.Fatalf("no confirm naming the culprits: %+v", top)
-	}
-	if _, err := a.r.Execute(ochazuke.Request{Noun: "ochazuke.confirm", Verb: "accept"}); err != nil {
-		t.Fatal(err)
-	}
-	settle(t, a)
+	d.keys("y")
 	for _, p := range []string{".npm/_cacache/a", "Library/pnpm/store/v10/f", "src/one/.turbo/cache/blob"} {
 		if _, err := os.Stat(filepath.Join(env.Home, p)); err == nil {
 			t.Errorf("%s survived", p)
@@ -1152,33 +1148,68 @@ func TestClearContinuesPastPermissionError(t *testing.T) {
 	}
 }
 
-// scan, top and free are verbs of the culprit noun (culprit.scan,
-// culprit.top, culprit.clear's free), so the palette, MCP and keys reach
-// them; tui is the one command that opens the terminal page.
-func TestWordsAreVerbsNotCommands(t *testing.T) {
-	a, err := New(fixture(t))
+// Catalog and query follow the matomeru-next/ext/catalog.go wire protocol.
+func TestCatalogAndQueryProtocol(t *testing.T) {
+	env := fixture(t)
+	out, err := run(t, env, "catalog")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal(err, out)
 	}
-	for _, key := range []string{"culprit.scan", "culprit.top", "culprit.free"} {
-		if _, ok := a.r.Operation(key); !ok {
-			t.Errorf("no %s", key)
+	var m Manifest
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatal(err, out)
+	}
+	if m.Name != "o-df" || m.Version != Version {
+		t.Fatalf("manifest header: %+v", m)
+	}
+	if len(m.Schemas) != 1 || m.Schemas[0].Kind != CulpritKind {
+		t.Fatalf("schemas: %+v", m.Schemas)
+	}
+	if len(m.Commands) < 5 {
+		t.Fatalf("too few commands: %+v", m.Commands)
+	}
+
+	qout, err := run(t, env, "query", "npm")
+	if err != nil {
+		t.Fatal(err, qout)
+	}
+	var qr QueryResult
+	if err := json.Unmarshal([]byte(qout), &qr); err != nil {
+		t.Fatal(err, qout)
+	}
+	if qr.Total != len(qr.Items) || qr.Total == 0 {
+		t.Fatalf("query npm: %+v", qr)
+	}
+	for _, it := range qr.Items {
+		if it.Kind != CulpritKind || it.ID == "" {
+			t.Errorf("bad record: %+v", it)
 		}
 	}
-	out, err := run(t, fixture(t), "catalog")
-	if err != nil {
-		t.Fatal(err)
+
+	// --smoke CLI flag runs headless checks cleanly.
+	sout, err := run(t, env, "--smoke")
+	if err != nil || !strings.Contains(sout, "checks passed") {
+		t.Fatalf("--smoke: %v\n%s", err, sout)
 	}
-	var cat struct {
-		Commands []struct{ Name, Source string }
+
+	// --version prints version; culprits lists rows; trim defaults to dry-run.
+	vout, err := run(t, env, "--version")
+	if err != nil || !strings.Contains(vout, Version) {
+		t.Fatalf("--version: %v %s", err, vout)
 	}
-	if err := json.Unmarshal([]byte(out), &cat); err != nil {
-		t.Fatal(err)
+	cout, err := run(t, env, "culprits")
+	if err != nil || !strings.Contains(cout, "npm-cache") {
+		t.Fatalf("culprits: %v %s", err, cout)
 	}
-	for _, c := range cat.Commands {
-		if c.Source == "o-df" && c.Name != "tui" {
-			t.Errorf("command %s is not a verb", c.Name)
-		}
+	removed := trimTree(t, env, map[string]int{"a.bak-1": 1, "a.bak-9": 9}, `"days": 5`)
+	env.Remove = func(p string) error { *removed = append(*removed, filepath.Base(p)); return nil }
+	tout, err := run(t, env, "trim", "copies")
+	if err != nil || !strings.Contains(tout, `"dry_run": true`) || len(*removed) != 0 {
+		t.Fatalf("trim default should be dry-run: %v %s removed=%v", err, tout, *removed)
+	}
+	tout, err = run(t, env, "trim", "copies", "--apply", "--yes")
+	if err != nil || !strings.Contains(tout, `"dry_run": false`) || !slices.Equal(*removed, []string{"a.bak-9"}) {
+		t.Fatalf("trim --apply: %v %s removed=%v", err, tout, *removed)
 	}
 }
 

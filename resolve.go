@@ -4,9 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
-
-	"ofam.dev/oden"
 )
 
 // Culprit names resolve the way oden resolves command words: an exact name
@@ -20,12 +19,12 @@ import (
 
 // Resolve is the culprit word names.
 func (cfg Config) Resolve(word string) (Culprit, error) {
-	res := cfg.catalog().Resolve(word)
+	res := cfg.resolve(word)
 	switch {
-	case res.Resolved():
-		return cfg.byName(res.Entry.Name), nil
-	case res.Ambiguous:
-		return Culprit{}, fmt.Errorf("%q is ambiguous: %s", word, strings.Join(entryNames(res.Candidates), ", "))
+	case res.name != "":
+		return cfg.byName(res.name), nil
+	case res.ambiguous:
+		return Culprit{}, fmt.Errorf("%q is ambiguous: %s", word, strings.Join(res.candidates, ", "))
 	}
 	if s := cfg.Suggest(word); len(s) > 0 {
 		return Culprit{}, fmt.Errorf("no culprit %q; did you mean: %s (o-df culprit list names them)", word, strings.Join(s, ", "))
@@ -61,38 +60,86 @@ func (cfg Config) Candidates(word string) []Culprit {
 	if word == "" {
 		return slices.Clone(cfg.Culprits)
 	}
-	res := cfg.catalog().Resolve(word)
 	var out []Culprit
-	for _, e := range res.Candidates {
-		out = append(out, cfg.byName(e.Name))
+	for _, n := range cfg.resolve(word).candidates {
+		out = append(out, cfg.byName(n))
 	}
 	return out
 }
 
-// catalog is the culprits as an oden catalog: each row a command named by
-// its name, with its aliases, so oden's Resolve (exact, alias, unique
-// prefix, the descendant rule) is the matcher. Names win over aliases; a
-// later row's alias that another row already claims is shadowed, as in
-// oden.
-func (cfg Config) catalog() *oden.Catalog {
-	cmds := make([]*oden.Command, len(cfg.Culprits))
-	for i, c := range cfg.Culprits {
-		cmds[i] = &oden.Command{Name: c.Name, Aliases: c.Aliases, Source: c.Source}
+// resolution is what a word names: one culprit (name), or the candidates
+// an ambiguous prefix shares.
+type resolution struct {
+	name       string
+	candidates []string
+	ambiguous  bool
+}
+
+// tokens maps every name and alias to its culprit's name. Names win over
+// aliases; a later row's alias that another row already claims is
+// shadowed (oden's catalog rule, copied from ~/proj/oden/catalog.go).
+func (cfg Config) tokens() map[string]string {
+	t := make(map[string]string, len(cfg.Culprits))
+	for _, c := range cfg.Culprits {
+		t[c.Name] = c.Name
 	}
-	return oden.NewCatalog("o-df", cmds, nil, nil)
+	for _, c := range cfg.Culprits {
+		for _, a := range c.Aliases {
+			if _, taken := t[a]; !taken {
+				t[a] = c.Name
+			}
+		}
+	}
+	return t
+}
+
+// resolve matches word as oden's Catalog.Resolve does: an exact name or
+// alias wins; else every culprit with a name or alias starting with word,
+// minus descendants (a name continuing another candidate's name with "-").
+func (cfg Config) resolve(word string) resolution {
+	if word == "" {
+		return resolution{}
+	}
+	t := cfg.tokens()
+	if n, ok := t[word]; ok {
+		return resolution{name: n, candidates: []string{n}}
+	}
+	seen := map[string]bool{}
+	var matches []string
+	for tok, n := range t {
+		if strings.HasPrefix(tok, word) && !seen[n] {
+			seen[n] = true
+			matches = append(matches, n)
+		}
+	}
+	var kept []string
+	for _, e := range matches {
+		nested := false
+		for _, o := range matches {
+			if o != e && strings.HasPrefix(e, o+"-") {
+				nested = true
+				break
+			}
+		}
+		if !nested {
+			kept = append(kept, e)
+		}
+	}
+	sort.Strings(kept)
+	res := resolution{candidates: kept}
+	switch len(kept) {
+	case 0:
+	case 1:
+		res.name = kept[0]
+	default:
+		res.ambiguous = true
+	}
+	return res
 }
 
 func (cfg Config) byName(name string) Culprit {
 	i := slices.IndexFunc(cfg.Culprits, func(c Culprit) bool { return c.Name == name })
 	return cfg.Culprits[i]
-}
-
-func entryNames(es []*oden.Entry) []string {
-	out := make([]string, len(es))
-	for i, e := range es {
-		out[i] = e.Name
-	}
-	return out
 }
 
 // maxSuggestions caps the "did you mean" list.

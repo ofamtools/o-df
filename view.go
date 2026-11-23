@@ -2,152 +2,371 @@ package main
 
 import (
 	"fmt"
+	"math"
+	"slices"
+	"strconv"
 	"strings"
-	"time"
+	"unicode/utf8"
 
-	"github.com/charmbracelet/x/ansi"
-	"ofam.dev/ochazuke"
+	"ofam.dev/ochazuke/core"
+	"ofam.dev/ochazuke/ui"
+	"ofam.dev/ochazuke/widgets/picker"
+	"ofam.dev/ochazuke/widgets/table"
 )
 
-// The culprits page: a status line (the disk, the marked total, what is
-// loading), the culprit list on the left and the focused culprit's detail
-// on the right (stacked below stackWidth columns). The divider follows the
-// page's pane keys (> < =; Runtime.PaneLayout).
+// The page: a title line (the disk), the culprit list beside the focused
+// culprit's detail (stacked below stackWidth columns), the filter line
+// while typing, an info line and a status line. Modals draw over it.
 
-const stackWidth = 80
-
-func (a *App) render(r *ochazuke.Runtime, width, height int) ochazuke.Block {
-	s := ochazuke.NewStyles(*a.m.Appearance)
-	l := r.PaneLayout(pageID, ochazuke.Layout{Width: width, Height: height, Styles: s})
-	status := s.Muted.Render(ansi.Truncate(a.statusLine(), width, "…"))
-	bh := max(0, height-1)
-	if bh < 6 || width < 20 {
-		return ochazuke.Text(status)
-	}
-	title := fmt.Sprintf("Culprits %d", a.list.Len())
-	panel := func(w, h int) ochazuke.Block {
-		cw, ch := ochazuke.PanelContentSize(w, h)
-		return l.PanelBlock(title, ochazuke.Text(a.list.View(cw, ch)), w, h, a.list.Focused())
-	}
-	detail := func(w, h int) ochazuke.Block {
-		cw, _ := ochazuke.PanelContentSize(w, h)
-		return l.PanelBlock("Detail", ochazuke.Text(ansi.Hardwrap(a.detailText(), max(1, cw), true)), w, h, false)
-	}
-	if width < stackWidth {
-		lh := l.Divide(bh*3/5, bh, ochazuke.PaneMinHeight)
-		return ochazuke.Text(status + "\n" + panel(width, lh).Text + "\n" + detail(width, bh-lh).Text)
-	}
-	lw := l.Divide(width*3/5, width-1, ochazuke.PaneMinWidth)
-	left, right := strings.Split(panel(lw, bh).Text, "\n"), strings.Split(detail(width-lw-1, bh).Text, "\n")
-	rows := make([]string, bh)
-	for i := range rows {
-		rows[i] = pad(at(left, i), lw) + " " + at(right, i)
-	}
-	return ochazuke.Text(status + "\n" + strings.Join(rows, "\n"))
+// geom is where the list lands: its size, the rows it shows, and whether
+// the detail pane sits beside it (else below).
+type geom struct {
+	tableW, tableH, rows int
+	side                 bool
 }
 
-func at(rows []string, i int) string {
-	if i < len(rows) {
-		return rows[i]
+func (u *UI) geometry(p *Page, w, h int) geom {
+	if w <= 0 || h <= 0 {
+		w, h = 120, 32
 	}
-	return ""
+	body := h - 3
+	if p.Typing {
+		body--
+	}
+	body = max(body, 3)
+	g := geom{tableW: w, tableH: body}
+	if p.Detail {
+		if w >= u.StackW {
+			g.side = true
+			g.tableW = int(math.Round(float64(max(0, w-1)) * p.Ratio))
+		} else {
+			g.tableH = int(math.Round(float64(max(0, body-1)) * p.Ratio))
+		}
+	}
+	g.rows = max(g.tableH-2, 1)
+	return g
 }
 
-func pad(line string, width int) string {
-	return line + strings.Repeat(" ", max(0, width-ansi.StringWidth(line)))
+func textW(s string) int { return utf8.RuneCountInString(s) }
+
+func text(t, tone string) ui.ViewNode {
+	return ui.ViewNode{Kind: ui.KindText, Tone: tone, Props: map[string]any{"text": t}}
 }
 
-func (a *App) statusLine() string {
-	var parts []string
-	if a.disk.Size > 0 {
-		parts = append(parts, diskLine(a.disk))
+func clip(s string, w int) string {
+	if r := []rune(s); w > 1 && len(r) > w {
+		return string(r[:w-1]) + "…"
 	}
+	return s
+}
+
+// view builds the whole screen.
+func (u *UI) view(s core.State) ui.ViewNode {
+	p := pageOf(s)
+	w := s.Width
+	if w <= 0 {
+		w = 120
+	}
+	g := u.geometry(&p, s.Width, s.Height)
+	grid := p.Grid.Copy()
+	grid.PageSize = g.rows
+	grid.Columns = make([]table.Column, len(gridColumns))
+	for i, c := range gridColumns {
+		if c.Key == p.Sort {
+			if p.Desc {
+				c.Title += " ▼"
+			} else {
+				c.Title += " ▲"
+			}
+		}
+		grid.Columns[i] = c
+	}
+	body := grid.View(nodeGrid)
+	body.Title = fmt.Sprintf("Culprits %d", len(p.Reports))
+	if p.Detail {
+		split := ui.ViewNode{ID: "body", Kind: ui.KindSplit, Ratio: p.Ratio, Gap: 1, Props: map[string]any{"axis": "horizontal"}}
+		if !g.side {
+			split.Props["axis"] = "vertical"
+		}
+		split.Children = []ui.ViewNode{body, u.detailNode(&p, &grid)}
+		body = split
+	}
+	children := []ui.ViewNode{u.titleLine(&p, w), body}
+	if p.Typing {
+		children = append(children, p.inputNode())
+	}
+	children = append(children, p.infoLine(s, &grid, w), statusLine(&p, w))
+	root := ui.ViewNode{ID: "root", Kind: ui.KindVStack, Children: []ui.ViewNode{
+		{ID: "page", Kind: ui.KindVStack, Scope: "grid", Children: children},
+	}}
+	for _, m := range s.Modals {
+		root.Children = append(root.Children, u.modalView(s, m))
+	}
+	return root
+}
+
+func (u *UI) titleLine(p *Page, w int) ui.ViewNode {
 	var total int64
-	for _, r := range a.reports {
+	for _, r := range p.Reports {
 		total += r.Bytes
 	}
-	parts = append(parts, "culprits "+Human(total))
-	if marked := a.list.Marked(); len(marked) > 0 {
-		var m int64
-		for _, it := range marked {
-			if rep, ok := it.Data.(Report); ok {
-				m += rep.Bytes
-			}
-		}
-		parts = append(parts, fmt.Sprintf("%d marked %s", len(marked), Human(m)))
+	line := fmt.Sprintf(" o-df · Culprits %d · %s", len(p.Reports), Human(total))
+	if p.Disk.Size > 0 {
+		line += " · " + diskLine(p.Disk)
 	}
-	if a.loading != "" {
-		parts = append(parts, a.loading+"…")
+	tone := "title"
+	switch {
+	case p.Loading:
+		line += " · sizing…"
+	case p.ScanErr != "":
+		line += " · sizing failed"
+		tone = "error"
 	}
-	if a.note != "" {
-		parts = append(parts, a.note)
+	if p.All {
+		line += " · absent shown"
 	}
-	if a.listErr != nil {
-		parts = append(parts, "error: "+a.listErr.Error())
-	}
-	return strings.Join(parts, "  ·  ")
+	return text(clip(line, w), tone)
 }
 
-// detailText describes the focused culprit.
-func (a *App) detailText() string {
-	item, ok := a.list.Selected()
-	if !ok {
-		if a.loading != "" {
-			return "Sizing the culprits…"
-		}
-		return "No culprit is present. o-df culprit list --all lists every row."
-	}
-	r, _ := item.Data.(Report)
-	return describe(a.Env, r, a.Now())
+func (p *Page) inputNode() ui.ViewNode {
+	line := p.QueryLine
+	line.Sync(p.Query)
+	return ui.ViewNode{ID: nodeFilter, Kind: ui.KindInput, Focusable: true, Title: "/ filter [" + string(p.Match) + "]", Props: map[string]any{
+		"value": p.Query, "cursor": line.Cursor,
+		"placeholder": "type to filter · enter keeps · esc clears · tab match mode · ↑↓ move · ctrl+a/e/w/u edit",
+	}}
 }
 
-// describe is a culprit's detail: its row and every path it expands to.
-func describe(env Env, r Report, now time.Time) string {
-	var b strings.Builder
-	line := func(k, v string) {
-		if v != "" {
-			fmt.Fprintf(&b, "%-11s %s\n", k, v)
+func (p *Page) infoLine(s core.State, grid *table.Model, w int) ui.ViewNode {
+	var parts []string
+	items := grid.Items()
+	pos := "no rows"
+	if len(items) > 0 {
+		pos = fmt.Sprintf("row %d/%d", grid.SelectedIdx+1, len(items))
+	}
+	if len(grid.Rows) != len(p.Reports) {
+		pos += fmt.Sprintf(" (%d of %d match)", len(grid.Rows), len(p.Reports))
+	}
+	parts = append(parts, pos, sortLabel(p))
+	if n, bytes := p.markedBytes(); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d marked %s", n, Human(bytes)))
+	}
+	tone := "muted"
+	if p.Query != "" || p.Typing {
+		parts = append(parts, fmt.Sprintf("filter %s %q", p.Match, p.Query))
+	}
+	if p.FilterErr != "" {
+		parts = append(parts, "regex error: "+p.FilterErr+" (no rows shown)")
+		tone = "error"
+	}
+	if p.Grid.GroupField != "" {
+		parts = append(parts, "grouped by "+p.Grid.GroupField)
+	}
+	if in := s.Input; in.Count != nil || len(in.Prefix) > 0 {
+		pre := strings.Join(in.Prefix, " ")
+		if in.Count != nil {
+			pre = strconv.Itoa(*in.Count) + " " + pre
 		}
+		parts = append(parts, "pending "+strings.TrimSpace(pre))
 	}
-	line("culprit", r.Name)
-	line("what", r.Title)
-	line("category", r.Category)
-	line("size", fmt.Sprintf("%s in %d files", Human(r.Bytes), r.Files))
-	if r.Errors > 0 {
-		line("unreadable", fmt.Sprintf("%d entries (the size is a lower bound)", r.Errors))
+	return text(clip(" "+strings.Join(parts, " · "), w), tone)
+}
+
+func statusLine(p *Page, w int) ui.ViewNode {
+	if p.Status != "" {
+		return text(clip(" "+strings.ReplaceAll(p.Status, "\n", " "), w), p.Tone)
 	}
-	line("size error", r.SizeErr)
-	if !r.LastUsed.IsZero() {
-		line("last used", r.LastUsed.Format("2006-01-02 15:04")+" ("+Ago(now, r.LastUsed)+" ago)")
+	hint := " ? help · : commands · / filter · s sort · g b group · space mark · d d clean · D clean all · t/T trim · m relocate · r rescan · q quit"
+	return text(clip(hint, w), "muted")
+}
+
+// detailNode shows the focused culprit's row and paths.
+func (u *UI) detailNode(p *Page, grid *table.Model) ui.ViewNode {
+	n := ui.ViewNode{ID: "detail", Kind: ui.KindPanel, Title: "Detail"}
+	it, ok := grid.Focused()
+	var body string
+	switch {
+	case !ok && p.Loading:
+		body = "Sizing the culprits…"
+	case !ok:
+		body = "No culprit is present. a lists absent culprits too."
+	case it.Header:
+		n.Title = "Group"
+		body = fmt.Sprintf("%s = %s\n%d culprit(s) · z a folds", p.Grid.GroupField, it.Group, it.Count)
+	default:
+		body = describe(u.App.Env, p.byName[it.Row.ID], u.App.Now())
 	}
-	rb := "no: clear refuses; relocate moves it"
-	if r.Rebuildable {
-		rb = "yes"
-	}
-	line("rebuildable", rb)
-	line("rebuild", r.Rebuild)
-	line("advice", r.Recommend)
-	line("notes", r.Notes)
-	for _, cmd := range r.Clear {
-		line("clear runs", strings.Join(cmd, " "))
-	}
-	line("source", env.Tilde(r.Source))
-	b.WriteString("\npaths\n")
-	for _, f := range r.Found {
-		switch f.State {
-		case "present":
-			size := Human(f.Usage.Bytes)
-			if f.Timeout {
-				size = "timeout"
+	t := text(body, "text")
+	t.ID = detailText
+	tail := text(" ", "text")
+	tail.ID = detailTail
+	n.Children = []ui.ViewNode{{ID: "detail.scroll", Kind: ui.KindScroll, Props: map[string]any{"offset": p.DetailOff}, Children: []ui.ViewNode{t, tail}}}
+	return n
+}
+
+func window(textBody string, off int) string {
+	lines := strings.Split(textBody, "\n")
+	off = min(max(off, 0), len(lines))
+	return strings.Join(lines[off:], "\n")
+}
+
+func (u *UI) modalView(s core.State, f core.Frame) ui.ViewNode {
+	switch f.ID {
+	case modalPalette:
+		m, _ := f.Data.(*picker.Model)
+		if m == nil {
+			break
+		}
+		return ui.ViewNode{ID: "palette.overlay", Kind: ui.KindOverlay, Scope: "palette", Title: "Command palette · " + string(m.MatchMode),
+			Props:    map[string]any{"widthPct": 70, "heightPct": 70},
+			Children: []ui.ViewNode{m.View(modalPalette), text("enter runs · esc closes · tab match mode · ↑↓ move · ctrl+a/e/w/u edit", "muted")}}
+	case modalHelp:
+		off, _ := f.Data.(int)
+		return ui.ViewNode{ID: modalHelp, Kind: ui.KindOverlay, Scope: "help", Focusable: true, Title: "Help · active key bindings",
+			Props:    map[string]any{"widthPct": 80, "heightPct": 85},
+			Children: []ui.ViewNode{text(window(strings.Join(u.helpLines(), "\n"), off), "text")}}
+	case modalConfirm:
+		d, _ := f.Data.(confirmData)
+		return ui.ViewNode{ID: modalConfirm, Kind: ui.KindOverlay, Scope: "confirm", Focusable: true, Title: d.Title,
+			Props: map[string]any{"widthPct": 70, "heightPct": 70},
+			Children: []ui.ViewNode{text(window(d.Text, d.Off), "text"),
+				text("y applies · n / esc cancels (nothing changes) · j/k scroll", "warning")}}
+	case modalPreview:
+		d, _ := f.Data.(previewData)
+		return ui.ViewNode{ID: modalPreview, Kind: ui.KindOverlay, Scope: "preview", Focusable: true, Title: d.Title,
+			Props:    map[string]any{"widthPct": 80, "heightPct": 75},
+			Children: []ui.ViewNode{text(window(d.Text, d.Off), "text")}}
+	case modalForm:
+		rf, ok := f.Data.(relocateForm)
+		if !ok {
+			break
+		}
+		kids := []ui.ViewNode{rf.M.View(modalForm)}
+		for _, sp := range rf.M.Specs {
+			if e := rf.M.Errors[sp.Name]; e != "" {
+				kids = append(kids, text(sp.Name+": "+e, "error"))
 			}
-			fmt.Fprintf(&b, "  %7s  %s\n", size, env.Tilde(f.Path))
-		case "symlink":
-			fmt.Fprintf(&b, "  %7s  %s → %s\n", "link", env.Tilde(f.Path), f.Target)
-		case "external":
-			fmt.Fprintf(&b, "  %7s  %s → %s (another volume; external: true reads it)\n", "skipped", env.Tilde(f.Path), f.Target)
+		}
+		kids = append(kids, text("type to edit (ctrl+a/e/w/u) · space flips yes/no · tab/↑↓ field · enter shows the dry run · esc cancels", "muted"))
+		return ui.ViewNode{ID: "form.overlay", Kind: ui.KindOverlay, Scope: "form", Title: rf.M.Title, Props: map[string]any{"widthPct": 70}, Children: kids}
+	}
+	return ui.ViewNode{ID: f.ID + ".overlay", Kind: ui.KindOverlay, Children: []ui.ViewNode{text(f.ID, "muted")}}
+}
+
+// --- live help ---------------------------------------------------------------------
+
+// keyHelp is one binding that actually resolves in its mode.
+type keyHelp struct{ Keys, Command, Desc string }
+
+var helpSections = []struct {
+	mode, title string
+	chain       []core.ContextFrame
+}{
+	{"normal", "Culprits", []core.ContextFrame{{Scope: "row"}, {Scope: "grid"}, {Scope: "app"}}},
+	{"input", "Filter input (/)", []core.ContextFrame{{Scope: "grid"}, {Scope: "app"}}},
+	{"palette", "Command palette (:)", []core.ContextFrame{{Scope: "palette"}, {Scope: "app"}}},
+	{"confirm", "Confirm (dry run of d d, D, T, m)", []core.ContextFrame{{Scope: "confirm"}, {Scope: "app"}}},
+	{"preview", "Trim dry run (t)", []core.ContextFrame{{Scope: "preview"}, {Scope: "app"}}},
+	{"form", "Relocate form (m)", []core.ContextFrame{{Scope: "form"}, {Scope: "app"}}},
+	{"help", "Help", []core.ContextFrame{{Scope: "help"}, {Scope: "app"}}},
+}
+
+var classSamples = map[string]string{core.ClassDigit0: "0", core.ClassDigit: "5", core.ClassAlpha: "x", core.ClassPrintable: "x", core.ClassPaste: core.PasteKey, core.ClassAny: "x"}
+
+// resolveWinner runs keys through the keymap from an idle state and
+// returns the binding that fires.
+func resolveWinner(km *core.Keymap, chain []core.ContextFrame, mode string, keys []string) *core.Binding {
+	in := core.InputState{}
+	for i, k := range keys {
+		res := km.Resolve(core.KeyQuery{Chain: chain, Mode: mode, Input: in, Key: k, Text: k})
+		in = res.Input
+		last := i == len(keys)-1
+		switch {
+		case !last && res.Outcome == core.Pending:
+		case last && (res.Outcome == core.Matched || res.Outcome == core.PushedLayer):
+			return res.Trace.Winner
+		case last && res.Outcome == core.Pending && res.Trace.Winner != nil:
+			return res.Trace.Winner
 		default:
-			fmt.Fprintf(&b, "  %7s  %s\n", "absent", env.Tilde(f.Path))
+			return nil
 		}
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return nil
+}
+
+// activeBindings lists the bindings of mode that win resolution, so user
+// overrides and unbinds show exactly as they behave.
+func (u *UI) activeBindings(mode string, chain []core.ContextFrame) []keyHelp {
+	var out []keyHelp
+	seen := map[string]bool{}
+	for _, bd := range u.Bindings {
+		if bd.Hidden || bd.Unbind || (bd.Mode != mode && bd.Mode != "") || bd.Command == "" && bd.Layer == nil {
+			continue
+		}
+		keys, label := bd.Keys, strings.Join(bd.Keys, " ")
+		if len(keys) == 0 {
+			sample, ok := classSamples[bd.Class]
+			if !ok {
+				continue
+			}
+			keys, label = []string{sample}, "‹"+bd.Class+"›"
+			if bd.Class == core.ClassDigit0 {
+				label = "0"
+			}
+		}
+		if seen[label] {
+			continue
+		}
+		win := resolveWinner(u.Km, chain, mode, keys)
+		if win == nil || win.Command != bd.Command || !slices.Equal(win.Keys, bd.Keys) || win.Class != bd.Class {
+			continue
+		}
+		seen[label] = true
+		desc := bd.Hint
+		if spec, ok := u.Km.Commands.Lookup(bd.Command); ok && spec.Description != "" {
+			desc = spec.Description
+		}
+		out = append(out, keyHelp{Keys: label, Command: bd.Command, Desc: desc})
+	}
+	return out
+}
+
+// keysByCommand maps command IDs to their active keys in mode.
+func keysByCommand(u *UI, mode string) map[string][]string {
+	out := map[string][]string{}
+	for _, sec := range helpSections {
+		if sec.mode != mode {
+			continue
+		}
+		for _, k := range u.activeBindings(mode, sec.chain) {
+			out[k.Command] = append(out[k.Command], k.Keys)
+		}
+	}
+	return out
+}
+
+// helpLines renders the help page from the live keymap.
+func (u *UI) helpLines() []string {
+	var lines []string
+	for _, sec := range helpSections {
+		bs := u.activeBindings(sec.mode, sec.chain)
+		if len(bs) == 0 {
+			continue
+		}
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, sec.title)
+		for _, k := range bs {
+			lines = append(lines, fmt.Sprintf("  %-12s %s  (%s)", k.Keys, k.Desc, k.Command))
+		}
+	}
+	lines = append(lines, "",
+		"Nothing is removed without the confirm: d d, D, T and m show the dry run; only y applies it.",
+		"Counts prefix motions: 10j, 5G. Marked culprits (space) are what d d cleans.",
+		"bindings.json, themes.json and settings.json load from the culprits file's directory (~/.config/o-df).")
+	for _, n := range u.Notes {
+		lines = append(lines, "config: "+n)
+	}
+	return lines
 }
