@@ -16,8 +16,11 @@ import (
 	"text/tabwriter"
 	"time"
 
+	ochacli "ofam.dev/ochazuke/cli"
 	"ofam.dev/ochazuke/config"
+	"ofam.dev/ochazuke/core"
 	"ofam.dev/ochazuke/ui"
+	"ofam.dev/oden"
 )
 
 // The command line. Every read command prints JSON (--format table, or a
@@ -101,104 +104,277 @@ var interactiveTerminal = func() bool {
 	return true
 }
 
-// Main runs one invocation.
+// Main runs one invocation through the uniform Ochazuke v2 / Oden v2 CLI shell.
 func Main(args []string, env Env, stdin io.Reader, stdout, stderr io.Writer) error {
-	if len(args) > 0 {
-		switch args[0] {
-		case "--version", "-version", "version":
-			_, err := fmt.Fprintln(stdout, "o-df", Version)
-			return err
-		case "--help", "-h", "-help", "help":
-			_, err := io.WriteString(stdout, usage)
-			return err
-		case "--smoke":
-			if runSmoke(stdout) != 0 {
+	app := newOdenApp(args, env, stdin, stdout, stderr)
+	return app.Run(context.Background())
+}
+
+func newOdenApp(args []string, env Env, stdin io.Reader, stdout, stderr io.Writer) *oden.App {
+	var cached *cli
+	getCLI := func() (*cli, error) {
+		if cached != nil {
+			return cached, nil
+		}
+		a, err := New(env)
+		if err != nil {
+			return nil, err
+		}
+		a.Stdin, a.Stdout, a.Stderr = stdin, stdout, stderr
+		cached = &cli{a: a, in: bufio.NewReader(stdin)}
+		return cached, nil
+	}
+	withCLI := func(fn func(c *cli, args []string) error) func(*oden.Ctx) error {
+		return func(oc *oden.Ctx) error {
+			c, err := getCLI()
+			if err != nil {
+				return err
+			}
+			return fn(c, oc.Args)
+		}
+	}
+
+	info := ochacli.AppInfo{
+		Name:     "o-df",
+		Version:  Version,
+		Summary:  "Find and clear the usual disk hogs (caches, stores, downloads)",
+		HelpText: usage,
+		Modes:    func() []core.Mode { return modes },
+		Bindings: func() []core.Binding { return defaultBindings() },
+		Specs:    func() []core.CommandSpec { return commandSpecs() },
+		RunTUI: func(_ context.Context, rootArgs []string) error {
+			c, err := getCLI()
+			if err != nil {
+				return err
+			}
+			return c.scan(rootArgs, true)
+		},
+		RunSmoke: func(out io.Writer, _ bool) error {
+			if runSmoke(out) != 0 {
 				return &exitError{Code: 1, Err: errors.New("smoke failed")}
 			}
 			return nil
-		case "catalog":
-			return writeJSON(stdout, catalogManifest())
-		}
+		},
+		Manifest: dfExtManifest(),
+		Capabilities: &oden.Capabilities{
+			Name:         "o-df",
+			Version:      Version,
+			Summary:      "Find and clear the usual disk hogs (caches, stores, downloads)",
+			Capabilities: []string{"query", "catalog", "tui"},
+		},
+		Query: func(ctx context.Context, kind string, qargs []string) (oden.ExtQueryResult, error) {
+			c, err := getCLI()
+			if err != nil {
+				return oden.ExtQueryResult{}, err
+			}
+			return c.queryExt(ctx, kind, qargs)
+		},
 	}
-	a, err := New(env)
+
+	app := ochacli.NewApp(info, args, oden.WithStdio(stdin, stdout, stderr))
+
+	app.Add(
+		oden.Command{
+			Name:    "scan",
+			Summary: "size culprits and disk totals (opens TUI at a terminal)",
+			Usage:   "[--all] [--external] [--timeout D] [--json|--format json|table]",
+			Handle:  withCLI(func(c *cli, a []string) error { return c.scan(a, true) }),
+		},
+		oden.Command{
+			Name:    "top",
+			Summary: "biggest directories and files under PATH",
+			Usage:   "[PATH] [--depth N] [--n N] [--min SIZE] [--timeout D] [--external] [--format F]",
+			Handle:  withCLI(func(c *cli, a []string) error { return c.top(a) }),
+		},
+		oden.Command{
+			Name:    "culprits",
+			Summary: "list every culprit row of the merged culprits file (unsized)",
+			Usage:   "[--json|--format json|table]",
+			Handle:  withCLI(func(c *cli, a []string) error { return c.culprits(a) }),
+		},
+		oden.Command{
+			Name:    "list",
+			Summary: "list sized culprit rows, biggest first",
+			Usage:   "[--all] [--external] [--json|--format json|table]",
+			Handle:  withCLI(func(c *cli, a []string) error { return c.list(a) }),
+		},
+		oden.Command{
+			Name:    "show",
+			Summary: "show one culprit's row and sized paths",
+			Usage:   "NAME [--json|--format json|table]",
+			Handle:  withCLI(func(c *cli, a []string) error { return c.show(a) }),
+		},
+		oden.Command{
+			Name:    "size",
+			Summary: "print one culprit's size as JSON",
+			Usage:   "NAME",
+			Handle:  withCLI(func(c *cli, a []string) error { return c.size(a) }),
+		},
+		oden.Command{
+			Name:    "clean",
+			Aliases: []string{"clear", "free", "delete"},
+			Summary: "empty rebuildable culprits (asks first unless --yes)",
+			Usage:   "NAME... | --all [--names JSON] [--yes]",
+			Handle:  withCLI(func(c *cli, a []string) error { return c.clean(a, false) }),
+		},
+		oden.Command{
+			Name:    "trim",
+			Summary: "apply a culprit's retention rule (dry run unless --apply)",
+			Usage:   "NAME [--apply] [--yes]",
+			Handle:  withCLI(func(c *cli, a []string) error { return c.trim(a, false) }),
+		},
+		oden.Command{
+			Name:    "relocate",
+			Summary: "copy, verify, and delete a culprit's source paths",
+			Usage:   "NAME [--to DIR] [--link] [--same-volume] [--yes]",
+			Handle:  withCLI(func(c *cli, a []string) error { return c.relocate(a) }),
+		},
+		oden.Command{
+			Name:    "tui",
+			Aliases: []string{"view"},
+			Summary: "open the interactive culprits page",
+			Usage:   "[--all] [--smoke [--width N --height N]]",
+			Handle:  withCLI(func(c *cli, a []string) error { return c.tui(a) }),
+		},
+		oden.Command{
+			Name:    "culprit",
+			Summary: "v1 noun-verb culprit commands",
+			Usage:   "<verb> [ARGS]",
+			Children: []oden.Command{
+				{Name: "list", Summary: "list sized culprit rows", Handle: withCLI(func(c *cli, a []string) error { return c.list(a) })},
+				{Name: "names", Summary: "list matching culprit names", Handle: withCLI(func(c *cli, a []string) error { return c.names(a) })},
+				{Name: "show", Summary: "show one culprit's details", Handle: withCLI(func(c *cli, a []string) error { return c.show(a) })},
+				{Name: "size", Summary: "show one culprit's size", Handle: withCLI(func(c *cli, a []string) error { return c.size(a) })},
+				{Name: "get", Summary: "get a culprit row or property", Handle: withCLI(func(c *cli, a []string) error { return c.get(a) })},
+				{Name: "scan", Summary: "scan culprits without opening TUI", Handle: withCLI(func(c *cli, a []string) error { return c.scan(a, false) })},
+				{Name: "top", Summary: "biggest directories and files", Handle: withCLI(func(c *cli, a []string) error { return c.top(a) })},
+				{Name: "clear", Aliases: []string{"free", "delete"}, Summary: "empty rebuildable culprits", Handle: withCLI(func(c *cli, a []string) error { return c.clean(a, false) })},
+				{Name: "clear-all", Summary: "empty all rebuildable culprits", Handle: withCLI(func(c *cli, a []string) error { return c.clean(a, true) })},
+				{Name: "trim", Summary: "trim a culprit by retention rule", Handle: withCLI(func(c *cli, a []string) error { return c.trim(a, true) })},
+				{Name: "relocate", Summary: "relocate a culprit", Handle: withCLI(func(c *cli, a []string) error { return c.relocate(a) })},
+			},
+		},
+	)
+
+	// Allow opening a directory/file path directly (delegates to top) while keeping
+	// oden's default handling for empty args, flags, and unknown commands.
+	app.Default = func(ctx context.Context, rootArgs []string) error {
+		if len(rootArgs) == 0 || strings.HasPrefix(rootArgs[0], "-") {
+			return info.RunTUI(ctx, rootArgs)
+		}
+		if _, err := os.Stat(rootArgs[0]); err == nil {
+			c, err := getCLI()
+			if err != nil {
+				return err
+			}
+			return c.top(rootArgs)
+		}
+		return oden.ErrNotFound
+	}
+
+	return app
+}
+
+func dfExtManifest() *oden.ExtManifest {
+	m := catalogManifest()
+	schemas := make([]oden.ExtSchema, 0, len(m.Schemas))
+	for _, s := range m.Schemas {
+		fields := make([]oden.ExtField, 0, len(s.Fields))
+		for _, f := range s.Fields {
+			fields = append(fields, oden.ExtField{
+				Name:        f.Name,
+				Type:        string(f.Type),
+				Required:    f.Required,
+				Description: f.Description,
+				Enum:        f.Enum,
+				Default:     f.Default,
+				RefKinds:    f.RefKinds,
+			})
+		}
+		schemas = append(schemas, oden.ExtSchema{
+			Kind:           s.Kind,
+			Title:          s.Title,
+			Plural:         s.Plural,
+			Fields:         fields,
+			DefaultColumns: s.DefaultColumns,
+			SummaryField:   s.SummaryField,
+			UniqueFields:   s.UniqueFields,
+		})
+	}
+	cmds := make([]oden.ExtCommand, 0, len(m.Commands))
+	for _, cmd := range m.Commands {
+		params := make([]oden.ExtField, 0, len(cmd.Params))
+		for _, p := range cmd.Params {
+			params = append(params, oden.ExtField{
+				Name:        p.Name,
+				Type:        string(p.Type),
+				Required:    p.Required,
+				Description: p.Description,
+				Enum:        p.Enum,
+				Default:     p.Default,
+				RefKinds:    p.RefKinds,
+			})
+		}
+		cmds = append(cmds, oden.ExtCommand{
+			ID:          cmd.ID,
+			Description: cmd.Description,
+			Params:      params,
+			Tags:        cmd.Tags,
+			Meta:        cmd.Meta,
+		})
+	}
+	return &oden.ExtManifest{
+		Name:     m.Name,
+		Version:  m.Version,
+		Schemas:  schemas,
+		Commands: cmds,
+	}
+}
+
+func (c *cli) queryExt(ctx context.Context, kind string, args []string) (oden.ExtQueryResult, error) {
+	if kind != "" && kind != CulpritKind && kind != "culprit" {
+		return oden.ExtQueryResult{}, fmt.Errorf("unknown kind %q (expected %s)", kind, CulpritKind)
+	}
+	p, err := parseArgs(args, []string{"sized", "all"}, []string{"format"})
 	if err != nil {
-		return err
+		return oden.ExtQueryResult{}, err
 	}
-	a.Stdin, a.Stdout, a.Stderr = stdin, stdout, stderr
-	c := &cli{a: a, in: bufio.NewReader(stdin)}
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return c.scan(args, true)
-	}
-	cmd, rest := args[0], args[1:]
-	if cmd == "culprit" {
-		if len(rest) == 0 {
-			return usageErr("culprit takes a verb: list, show, size, get, scan, top, clear, clear-all, trim, relocate")
+	q := strings.Join(p.pos, " ")
+	var cs []Culprit
+	for _, cu := range c.a.Cfg.Culprits {
+		if matchesQuery(cu, q) {
+			cs = append(cs, cu)
 		}
-		return c.culprit(rest[0], rest[1:])
 	}
-	switch cmd {
-	case "scan":
-		return c.scan(rest, true)
-	case "top":
-		return c.top(rest)
-	case "culprits":
-		return c.culprits(rest)
-	case "list":
-		return c.list(rest)
-	case "show":
-		return c.show(rest)
-	case "size":
-		return c.size(rest)
-	case "clean", "clear", "free", "delete":
-		return c.clean(rest, false)
-	case "trim":
-		return c.trim(rest, false)
-	case "relocate":
-		return c.relocate(rest)
-	case "tui", "view":
-		return c.tui(rest)
-	case "query":
-		return c.query(rest)
+	res := oden.ExtQueryResult{Items: []oden.ExtRecord{}}
+	toExt := func(rec Record) oden.ExtRecord {
+		return oden.ExtRecord{
+			Kind:            rec.Kind,
+			ID:              rec.ID,
+			Fields:          rec.Fields,
+			ArchiveStatus:   rec.ArchiveStatus,
+			StarStatus:      rec.StarStatus,
+			ChangeSetNumber: rec.ChangeSetNumber,
+			CreatedAt:       rec.CreatedAt,
+			UpdatedAt:       rec.UpdatedAt,
+		}
 	}
-	msg := fmt.Sprintf("unknown command %q (o-df --help lists them)", cmd)
-	if _, err := a.Cfg.Resolve(cmd); err == nil {
-		msg += fmt.Sprintf("; %q is a culprit: o-df show %s", cmd, cmd)
+	if p.has["sized"] {
+		for _, r := range ProbeAll(ctx, c.a.Env, cs) {
+			res.Items = append(res.Items, toExt(culpritRecord(r.Culprit, &r)))
+		}
+	} else {
+		for _, cu := range cs {
+			res.Items = append(res.Items, toExt(culpritRecord(cu, nil)))
+		}
 	}
-	return usageErr("%s", msg)
+	res.Total = len(res.Items)
+	return res, nil
 }
 
 type cli struct {
 	a  *App
 	in *bufio.Reader
-}
-
-// culprit runs the v1 noun-verb words.
-func (c *cli) culprit(verb string, args []string) error {
-	switch verb {
-	case "list":
-		return c.list(args)
-	case "names":
-		return c.names(args)
-	case "show":
-		return c.show(args)
-	case "size":
-		return c.size(args)
-	case "get":
-		return c.get(args)
-	case "scan":
-		return c.scan(args, false)
-	case "top":
-		return c.top(args)
-	case "clear", "free", "delete":
-		return c.clean(args, false)
-	case "clear-all":
-		return c.clean(args, true)
-	case "trim":
-		return c.trim(args, true)
-	case "relocate":
-		return c.relocate(args)
-	}
-	return usageErr("culprit has no verb %q (list, show, size, get, scan, top, clear, clear-all, trim, relocate)", verb)
 }
 
 // --- arguments -------------------------------------------------------------------------
@@ -524,32 +700,6 @@ func (c *cli) get(args []string) error {
 		}
 		return writeJSON(c.a.Stdout, v)
 	}
-}
-
-func (c *cli) query(args []string) error {
-	p, err := parseArgs(args, []string{"sized", "all"}, []string{"format"})
-	if err != nil {
-		return err
-	}
-	q := strings.Join(p.pos, " ")
-	var cs []Culprit
-	for _, cu := range c.a.Cfg.Culprits {
-		if matchesQuery(cu, q) {
-			cs = append(cs, cu)
-		}
-	}
-	res := QueryResult{Items: []Record{}}
-	if p.has["sized"] {
-		for _, r := range ProbeAll(context.Background(), c.a.Env, cs) {
-			res.Items = append(res.Items, culpritRecord(r.Culprit, &r))
-		}
-	} else {
-		for _, cu := range cs {
-			res.Items = append(res.Items, culpritRecord(cu, nil))
-		}
-	}
-	res.Total = len(res.Items)
-	return writeJSON(c.a.Stdout, res)
 }
 
 // --- changes -------------------------------------------------------------------------------
