@@ -62,7 +62,8 @@ Disk:
 
 Catalog protocol (read-only):
   catalog                the manifest: the df.culprit schema and o-df's commands
-  query [TEXT] [--sized] {"items": [...], "total": n} of culprit records
+  query [TEXT] [--kind df.culprit] [--unsized] [--present] [--timeout D]
+                         {"items": [...], "total": n} of sized culprit records
 
 Other:
   culprit list|show|size|get|scan|top|clear|free|delete|clear-all|trim|relocate ...
@@ -331,13 +332,19 @@ func dfExtManifest() *oden.ExtManifest {
 	}
 }
 
+// QueryTimeout bounds disk sizing during `o-df query` so catalog hosts never hang.
+var QueryTimeout = 10 * time.Second
+
 func (c *cli) queryExt(ctx context.Context, kind string, args []string) (oden.ExtQueryResult, error) {
 	if kind != "" && kind != CulpritKind && kind != "culprit" {
 		return oden.ExtQueryResult{}, fmt.Errorf("unknown kind %q (expected %s)", kind, CulpritKind)
 	}
-	p, err := parseArgs(args, []string{"sized", "all"}, []string{"format"})
+	p, err := parseArgs(args, []string{"sized", "unsized", "all", "present", "external"}, []string{"format", "timeout"})
 	if err != nil {
 		return oden.ExtQueryResult{}, err
+	}
+	if p.has["sized"] && p.has["unsized"] {
+		return oden.ExtQueryResult{}, usageErr("query takes --sized or --unsized, not both")
 	}
 	q := strings.Join(p.pos, " ")
 	var cs []Culprit
@@ -359,13 +366,35 @@ func (c *cli) queryExt(ctx context.Context, kind string, args []string) (oden.Ex
 			UpdatedAt:       rec.UpdatedAt,
 		}
 	}
-	if p.has["sized"] {
-		for _, r := range ProbeAll(ctx, c.a.Env, cs) {
-			res.Items = append(res.Items, toExt(culpritRecord(r.Culprit, &r)))
-		}
-	} else {
+	if p.has["unsized"] {
 		for _, cu := range cs {
 			res.Items = append(res.Items, toExt(culpritRecord(cu, nil)))
+		}
+	} else {
+		timeout := QueryTimeout
+		if d := p.str("timeout", ""); d != "" {
+			t, err := time.ParseDuration(d)
+			if err != nil {
+				return oden.ExtQueryResult{}, usageErr("--timeout: %v", err)
+			}
+			timeout = t
+		}
+		env := c.a.Env
+		if p.has["external"] {
+			env.External = true
+		}
+		qctx := ctx
+		var cancel context.CancelFunc
+		if timeout > 0 {
+			qctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		reps := ProbeAll(qctx, env, cs)
+		if p.has["present"] {
+			reps = presentOnly(reps)
+		}
+		for _, r := range reps {
+			res.Items = append(res.Items, toExt(culpritRecord(r.Culprit, &r)))
 		}
 	}
 	res.Total = len(res.Items)
@@ -489,13 +518,17 @@ func (c *cli) confirm(prompt string, yes bool) error {
 }
 
 func one(p parsed, verb string) (string, error) {
-	switch len(p.pos) {
+	pos := p.pos
+	if n := strings.TrimSpace(p.str("name", "")); n != "" {
+		pos = append(slices.Clone(pos), n)
+	}
+	switch len(pos) {
 	case 0:
 		return "", usageErr("a culprit is required: o-df %s NAME (o-df culprits names them)", verb)
 	case 1:
-		return p.pos[0], nil
+		return pos[0], nil
 	}
-	return "", usageErr("o-df %s takes one culprit (got %s)", verb, strings.Join(p.pos, " "))
+	return "", usageErr("o-df %s takes one culprit (got %s)", verb, strings.Join(pos, " "))
 }
 
 // --- reads -------------------------------------------------------------------------------
@@ -637,7 +670,7 @@ func (c *cli) names(args []string) error {
 }
 
 func (c *cli) show(args []string) error {
-	p, err := parseArgs(args, []string{"json"}, []string{"format"})
+	p, err := parseArgs(args, []string{"json"}, []string{"name", "format"})
 	if err != nil {
 		return err
 	}
@@ -658,7 +691,7 @@ func (c *cli) show(args []string) error {
 }
 
 func (c *cli) size(args []string) error {
-	p, err := parseArgs(args, nil, []string{"format"})
+	p, err := parseArgs(args, nil, []string{"name", "format"})
 	if err != nil {
 		return err
 	}
@@ -675,7 +708,7 @@ func (c *cli) size(args []string) error {
 
 // get is culprit get NAME [--prop size]: the row, or its computed size.
 func (c *cli) get(args []string) error {
-	p, err := parseArgs(args, nil, []string{"prop", "format"})
+	p, err := parseArgs(args, nil, []string{"name", "prop", "format"})
 	if err != nil {
 		return err
 	}
@@ -705,7 +738,7 @@ func (c *cli) get(args []string) error {
 // --- changes -------------------------------------------------------------------------------
 
 func (c *cli) clean(args []string, all bool) error {
-	p, err := parseArgs(args, []string{"all", "yes"}, []string{"names", "more"})
+	p, err := parseArgs(args, []string{"all", "yes"}, []string{"name", "names", "more"})
 	if err != nil {
 		return err
 	}
@@ -748,7 +781,7 @@ func (c *cli) clean(args []string, all bool) error {
 	return writeJSON(c.a.Stdout, res)
 }
 
-// cleanNames are the positional names, then --more and --names (a JSON
+// cleanNames are the positional names, then --name, --more and --names (a JSON
 // array or a comma/space list), once each.
 func cleanNames(p parsed) []string {
 	var names []string
@@ -760,6 +793,7 @@ func cleanNames(p parsed) []string {
 	for _, n := range p.pos {
 		add(n)
 	}
+	add(p.str("name", ""))
 	for _, n := range strings.Fields(p.str("more", "")) {
 		add(n)
 	}
@@ -778,7 +812,7 @@ func cleanNames(p parsed) []string {
 // trim is a dry run unless --apply; legacy (culprit trim) applies unless
 // --dry-run, as o-df v1 did. Applying asks first, listing each file.
 func (c *cli) trim(args []string, legacy bool) error {
-	p, err := parseArgs(args, []string{"dry-run", "apply", "yes"}, nil)
+	p, err := parseArgs(args, []string{"dry-run", "apply", "yes"}, []string{"name"})
 	if err != nil {
 		return err
 	}
@@ -822,7 +856,7 @@ func (c *cli) trim(args []string, legacy bool) error {
 }
 
 func (c *cli) relocate(args []string) error {
-	p, err := parseArgs(args, []string{"link", "same-volume", "yes"}, []string{"to"})
+	p, err := parseArgs(args, []string{"link", "same-volume", "yes"}, []string{"name", "to"})
 	if err != nil {
 		return err
 	}

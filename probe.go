@@ -354,6 +354,29 @@ func Human(n int64) string {
 	return fmt.Sprintf("%.0f%c", v, "KMGTPE"[exp])
 }
 
+// HumanSize is a byte count in powers of 1024 with a spaced unit suffix
+// ("0 B", "128 KB", "547 MB", "2.9 GB"), for catalog records and host tables.
+func HumanSize(n int64) string {
+	const unit = 1024
+	if n < 0 {
+		n = 0
+	}
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	units := []string{"KB", "MB", "GB", "TB", "PB", "EB"}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit && exp+1 < len(units); m /= unit {
+		div *= unit
+		exp++
+	}
+	v := float64(n) / float64(div)
+	if v < 10 {
+		return fmt.Sprintf("%.1f %s", v, units[exp])
+	}
+	return fmt.Sprintf("%.0f %s", v, units[exp])
+}
+
 // ParseSize reads 500M, 1G, 1.5G, 2048 (bytes).
 func ParseSize(s string) (int64, error) {
 	if s == "" {

@@ -556,6 +556,19 @@ func TestParseSizeAndHuman(t *testing.T) {
 	if Human(1<<30) != "1.0G" || Human(9_600_000_000) != "8.9G" || Human(12<<30) != "12G" {
 		t.Errorf("Human: %s %s %s", Human(1<<30), Human(9_600_000_000), Human(12<<30))
 	}
+	for n, want := range map[int64]string{
+		0:             "0 B",
+		512:           "512 B",
+		1024:          "1.0 KB",
+		547 << 20:     "547 MB",
+		1 << 30:       "1.0 GB",
+		3_113_851_289: "2.9 GB",
+		12 << 30:      "12 GB",
+	} {
+		if got := HumanSize(n); got != want {
+			t.Errorf("HumanSize(%d) = %q, want %q", n, got, want)
+		}
+	}
 }
 
 // external makes a directory outside HOME look like another volume
@@ -1279,5 +1292,177 @@ func TestTrimDryRunRemovesNothing(t *testing.T) {
 	out, err := run(t, env, "culprit", "trim", "copies", "--dry-run")
 	if err != nil || !strings.Contains(out, "a.bak-9") || strings.Contains(out, "a.bak-1\"") {
 		t.Fatalf("dry run: %v %s", err, out)
+	}
+}
+
+func TestCatalogSizeSchemaSizedQueryAndNonInteractiveClean(t *testing.T) {
+	env := fixture(t)
+
+	// 1. Catalog schema exposes size, sizeBytes, rebuildable in fields + defaultColumns,
+	//    and declares df.culprit.clean with argv ["o-df", "clean"] and --yes support.
+	catOut, err := run(t, env, "catalog")
+	if err != nil {
+		t.Fatal(err, catOut)
+	}
+	var m Manifest
+	if err := json.Unmarshal([]byte(catOut), &m); err != nil {
+		t.Fatal(err, catOut)
+	}
+	sc := m.Schemas[0]
+	wantCols := []string{"name", "size", "rebuildable", "category", "recommend"}
+	if !slices.Equal(sc.DefaultColumns, wantCols) {
+		t.Fatalf("defaultColumns = %v, want %v", sc.DefaultColumns, wantCols)
+	}
+	fieldTypes := map[string]core.ParamType{}
+	for _, f := range sc.Fields {
+		fieldTypes[f.Name] = f.Type
+	}
+	if fieldTypes["size"] != core.ParamString || fieldTypes["sizeBytes"] != core.ParamInt || fieldTypes["rebuildable"] != core.ParamBool {
+		t.Fatalf("unexpected field types: size=%q sizeBytes=%q rebuildable=%q", fieldTypes["size"], fieldTypes["sizeBytes"], fieldTypes["rebuildable"])
+	}
+	var cleanSpec *core.CommandSpec
+	for i := range m.Commands {
+		if m.Commands[i].ID == "df.culprit.clean" {
+			cleanSpec = &m.Commands[i]
+			break
+		}
+	}
+	if cleanSpec == nil {
+		t.Fatalf("catalog commands lack df.culprit.clean: %+v", m.Commands)
+	}
+	argv, _ := cleanSpec.Meta["argv"].([]any)
+	if len(argv) != 2 || argv[0] != "o-df" || argv[1] != "clean" {
+		t.Fatalf("df.culprit.clean meta.argv = %#v, want [o-df clean]", cleanSpec.Meta["argv"])
+	}
+	hasName, hasYes := false, false
+	for _, p := range cleanSpec.Params {
+		if p.Name == "name" && p.Required {
+			hasName = true
+		}
+		if p.Name == "yes" && p.Type == core.ParamBool {
+			hasYes = true
+		}
+	}
+	if !hasName || !hasYes {
+		t.Fatalf("df.culprit.clean params missing name/yes: %+v", cleanSpec.Params)
+	}
+
+	// 2. Default `query --kind df.culprit` returns live measured disk sizes sorted biggest-first.
+	qOut, err := run(t, env, "query", "--kind", "df.culprit")
+	if err != nil {
+		t.Fatal(err, qOut)
+	}
+	var qr QueryResult
+	if err := json.Unmarshal([]byte(qOut), &qr); err != nil {
+		t.Fatal(err, qOut)
+	}
+	if qr.Total != len(qr.Items) || qr.Total < 20 {
+		t.Fatalf("query total=%d len=%d", qr.Total, len(qr.Items))
+	}
+	// Fixture's 4 present culprits (256K downloads, 128K pnpm-store, 100K npm-cache, 32K turbo-cache) must lead.
+	wantTop := []string{"downloads", "pnpm-store", "npm-cache", "turbo-cache"}
+	for i, wantID := range wantTop {
+		if qr.Items[i].ID != wantID {
+			t.Fatalf("item[%d].ID = %q, want %q (top 4: %v)", i, qr.Items[i].ID, wantID, []string{qr.Items[0].ID, qr.Items[1].ID, qr.Items[2].ID, qr.Items[3].ID})
+		}
+		f := qr.Items[i].Fields
+		sz, ok := f["size"].(string)
+		if !ok || sz == "" || sz == "0 B" {
+			t.Errorf("%s: bad size %#v", wantID, f["size"])
+		}
+		sb, ok := f["sizeBytes"].(float64)
+		if !ok || sb <= 0 {
+			t.Errorf("%s: bad sizeBytes %#v", wantID, f["sizeBytes"])
+		}
+		rb, ok := f["rebuildable"].(bool)
+		if !ok || rb != (wantID != "downloads") {
+			t.Errorf("%s: bad rebuildable %#v", wantID, f["rebuildable"])
+		}
+	}
+	// Absent culprit has 0 B and present=false.
+	var bun *Record
+	for i := range qr.Items {
+		if qr.Items[i].ID == "bun-cache" {
+			bun = &qr.Items[i]
+			break
+		}
+	}
+	if bun == nil || bun.Fields["size"] != "0 B" || bun.Fields["sizeBytes"] != float64(0) || bun.Fields["present"] != false {
+		t.Fatalf("bun-cache absent record = %+v", bun)
+	}
+
+	// --present filters to only present culprits; --unsized skips sizing; --timeout bounds sizing.
+	pOut, err := run(t, env, "query", "--kind", "df.culprit", "--present")
+	if err != nil {
+		t.Fatal(err, pOut)
+	}
+	var pqr QueryResult
+	if err := json.Unmarshal([]byte(pOut), &pqr); err != nil {
+		t.Fatal(err, pOut)
+	}
+	if pqr.Total != 4 {
+		t.Fatalf("--present total = %d, want 4", pqr.Total)
+	}
+	uOut, err := run(t, env, "query", "--kind", "df.culprit", "--unsized", "npm")
+	if err != nil {
+		t.Fatal(err, uOut)
+	}
+	var uqr QueryResult
+	if err := json.Unmarshal([]byte(uOut), &uqr); err != nil {
+		t.Fatal(err, uOut)
+	}
+	if len(uqr.Items) == 0 {
+		t.Fatalf("--unsized returned no items")
+	}
+	if _, hasSize := uqr.Items[0].Fields["size"]; hasSize {
+		t.Errorf("--unsized should not populate size: %+v", uqr.Items[0].Fields)
+	}
+	if tOut, err := run(t, env, "query", "--kind", "df.culprit", "--timeout", "1ns", "npm"); err != nil || !strings.Contains(tOut, `"npm-cache"`) {
+		t.Fatalf("--timeout 1ns: %v %s", err, tOut)
+	}
+
+	// 3. Non-interactive `o-df clean NAME --yes` and `o-df clean --name NAME --yes` on temp HOME fixture.
+	var out, errb bytes.Buffer
+	if err := Main([]string{"clean", "npm-cache", "--yes"}, env, strings.NewReader(""), &out, &errb); err != nil {
+		t.Fatalf("clean positional --yes: %v %s %s", err, out.String(), errb.String())
+	}
+	var cr ClearResult
+	if err := json.Unmarshal(out.Bytes(), &cr); err != nil || cr.Name != "npm-cache" || cr.Freed == 0 {
+		t.Fatalf("clean npm-cache result: err=%v res=%+v raw=%s", err, cr, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(env.Home, ".npm/_cacache/a")); err == nil {
+		t.Fatal("npm-cache was not emptied")
+	}
+
+	out.Reset()
+	errb.Reset()
+	if err := Main([]string{"clean", "--name", "pnpm-store", "--yes"}, env, strings.NewReader(""), &out, &errb); err != nil {
+		t.Fatalf("clean --name --yes: %v %s %s", err, out.String(), errb.String())
+	}
+	if err := json.Unmarshal(out.Bytes(), &cr); err != nil || cr.Name != "pnpm-store" || cr.Freed == 0 {
+		t.Fatalf("clean --name pnpm-store result: err=%v res=%+v raw=%s", err, cr, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(env.Home, "Library/pnpm/store/v10/f")); err == nil {
+		t.Fatal("pnpm-store was not emptied")
+	}
+
+	// Non-rebuildable culprit is refused even with --yes.
+	out.Reset()
+	errb.Reset()
+	if err := Main([]string{"clean", "downloads", "--yes"}, env, strings.NewReader(""), &out, &errb); err == nil {
+		t.Fatalf("clean downloads --yes should fail: %s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(env.Home, "Downloads/big.zip")); err != nil {
+		t.Fatalf("downloads was touched: %v", err)
+	}
+
+	// Without --yes and empty stdin (non-interactive), clean cancels without deleting.
+	out.Reset()
+	errb.Reset()
+	if err := Main([]string{"clean", "turbo-cache"}, env, strings.NewReader(""), &out, &errb); err == nil {
+		t.Fatalf("clean without --yes on EOF stdin should cancel: %s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(env.Home, "src/one/.turbo/cache/blob")); err != nil {
+		t.Fatalf("turbo-cache was touched after cancel: %v", err)
 	}
 }

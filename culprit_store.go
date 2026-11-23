@@ -68,20 +68,22 @@ func culpritFields() []core.ParamSpec {
 	return []core.ParamSpec{
 		{Name: "name", Type: core.ParamString, Required: true, Description: "The culprit's name (an alias or a unique prefix names it too)"},
 		text("title", "What the row calls itself"),
+		text("size", `Human-readable disk size (e.g. "2.9 GB", "547 MB")`),
+		{Name: "sizeBytes", Type: core.ParamInt, Description: "Disk size in bytes"},
+		{Name: "rebuildable", Type: core.ParamBool, Description: "Whether the owning tool recreates the data on demand (only such a row can be cleaned)"},
 		text("category", "The kind of cache or data"),
+		{Name: "recommend", Type: core.ParamString, Enum: []string{"delete", "relocate", "keep"}, Description: "The advice the scan prints"},
 		{Name: "aliases", Type: core.ParamList, Description: "More words that name the row"},
 		{Name: "paths", Type: core.ParamList, Description: "The paths the row sizes (~-relative or absolute)"},
-		{Name: "rebuildable", Type: core.ParamBool, Description: "Whether the owning tool recreates the data on demand (only such a row can be cleaned)"},
 		text("rebuild", "How the data comes back"),
-		{Name: "recommend", Type: core.ParamString, Enum: []string{"delete", "relocate", "keep"}, Description: "The advice the scan prints"},
 		text("notes", "Notes on the row"),
 		{Name: "trimmable", Type: core.ParamBool, Description: "Whether the row has a retention rule (keep, days) trim applies"},
 		text("source", "Where the row came from: default or the user file"),
-		{Name: "bytes", Type: core.ParamInt, Description: "Size in bytes (query --sized only)"},
-		text("human", "Size, human readable (query --sized only)"),
-		{Name: "files", Type: core.ParamInt, Description: "Files counted (query --sized only)"},
-		{Name: "present", Type: core.ParamBool, Description: "Whether any path exists (query --sized only)"},
-		text("last_used", "Newest modification, RFC 3339 (query --sized only)"),
+		{Name: "bytes", Type: core.ParamInt, Description: "Size in bytes (alias of sizeBytes)"},
+		text("human", "Compact size, df -h style"),
+		{Name: "files", Type: core.ParamInt, Description: "Files counted"},
+		{Name: "present", Type: core.ParamBool, Description: "Whether any path exists"},
+		text("last_used", "Newest modification, RFC 3339"),
 	}
 }
 
@@ -89,7 +91,7 @@ func culpritSchema() Schema {
 	return Schema{
 		Kind: CulpritKind, Title: "Culprit", Plural: "Culprits",
 		Fields:         culpritFields(),
-		DefaultColumns: []string{"name", "category", "rebuildable", "recommend", "human"},
+		DefaultColumns: []string{"name", "size", "rebuildable", "category", "recommend"},
 		SummaryField:   "title",
 		UniqueFields:   []string{"name"},
 	}
@@ -105,14 +107,20 @@ func commandSpecsWire() []core.CommandSpec {
 	strp := func(n, d string) core.ParamSpec {
 		return core.ParamSpec{Name: n, Type: core.ParamString, Description: d}
 	}
+	clean := cmd("clean", "Empty rebuildable culprits (their clear commands, else their paths' contents); pass --yes for non-interactive cleanup", name, boolp("all", "every present rebuildable culprit"), boolp("yes", "do not ask"))
+	clean.Meta["destructive"] = true
+	clean.Meta["confirm"] = true
+	relocate := cmd("relocate", "Copy a culprit's paths to TO/<path under home>, verify, delete the source; asks first", name, core.ParamSpec{Name: "to", Type: core.ParamPath, Description: "destination root (default relocate_to)"}, boolp("link", "leave a symlink"), boolp("yes", "do not ask"))
+	relocate.Meta["destructive"] = true
+	relocate.Meta["confirm"] = true
 	specs := []core.CommandSpec{
 		cmd("scan", "Size every culprit and read the disk's totals: {disk, total, culprits} (read-only)", boolp("all", "include absent culprits"), boolp("external", "size paths on other volumes")),
 		cmd("top", "The biggest directories and files under PATH (read-only)", core.ParamSpec{Name: "path", Type: core.ParamPath}, core.ParamSpec{Name: "depth", Type: core.ParamInt, Default: 2}, strp("min", "smallest size reported (default 100M)")),
 		cmd("show", "One culprit's row and every path it expands to, sized (read-only)", name),
 		cmd("culprits", "Every culprit row of the merged culprits file, unsized (read-only)"),
-		cmd("clean", "Empty rebuildable culprits (their clear commands, else their paths' contents); asks first", name, boolp("all", "every present rebuildable culprit"), boolp("yes", "do not ask")),
+		clean,
 		cmd("trim", "Remove what a row's retention rule (keep, days, group, min_keep) says; a dry run unless --apply", name, boolp("apply", "remove the files (asks first)"), boolp("yes", "do not ask")),
-		cmd("relocate", "Copy a culprit's paths to TO/<path under home>, verify, delete the source; asks first", name, core.ParamSpec{Name: "to", Type: core.ParamPath, Description: "destination root (default relocate_to)"}, boolp("link", "leave a symlink"), boolp("yes", "do not ask")),
+		relocate,
 	}
 	for i := range specs {
 		specs[i].Tags = []string{"o-df"}
@@ -122,6 +130,19 @@ func commandSpecsWire() []core.CommandSpec {
 
 func catalogManifest() Manifest {
 	return Manifest{Name: "o-df", Version: Version, Schemas: []Schema{culpritSchema()}, Commands: commandSpecsWire()}
+}
+
+func recordSizeText(r Report) string {
+	size := HumanSize(r.Bytes)
+	if r.Errors > 0 {
+		size = "≥" + size
+	}
+	for _, f := range r.Found {
+		if f.Timeout {
+			size = "timeout"
+		}
+	}
+	return size
 }
 
 // culpritRecord is a culprit row as a record; rep, when set, adds its size.
@@ -143,6 +164,8 @@ func culpritRecord(c Culprit, rep *Report) Record {
 		f["title"] = c.Name
 	}
 	if rep != nil {
+		f["size"] = recordSizeText(*rep)
+		f["sizeBytes"] = rep.Bytes
 		f["bytes"], f["human"], f["files"], f["present"] = rep.Bytes, Human(rep.Bytes), rep.Files, rep.Present
 		if !rep.LastUsed.IsZero() {
 			f["last_used"] = rep.LastUsed.UTC().Format(time.RFC3339)
